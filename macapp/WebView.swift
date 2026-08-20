@@ -72,6 +72,10 @@ final class WebController: NSObject, ObservableObject {
     private var chain = RedirectGuard.Chain(appInitiated: true, anchorDomain: nil)
     /// True between starting a navigation and finishing it.
     private var navigationInFlight = false
+    /// A destination the user has been warned about, and how recently. Clicking the
+    /// same link again inside the window lets it through.
+    private var pendingConfirm: (url: URL, at: Date)?
+    private static let confirmWindow: TimeInterval = 12
     private var observations: [NSKeyValueObservation] = []
     private var toastClear: DispatchWorkItem?
     private var challengeTimeout: DispatchWorkItem?
@@ -137,6 +141,19 @@ final class WebController: NSObject, ObservableObject {
     /// Whatever is on screen, so a rebuild can put the user back where they were.
     var currentURL: URL? { webView.url }
 
+    /// The sites you actually use: everything in the bar, plus every domain of any
+    /// mirror set the destination belongs to. This is the allow-list, drawn from your
+    /// configuration rather than from a filter list.
+    private func knownDomains(for destination: URL) -> Set<String> {
+        var domains = DownloadManager.shared.knownSources()
+        if let set = MirrorDirectory.shared.set(owning: destination) {
+            for candidate in set.candidates {
+                if let host = candidate.host { domains.insert(registrableDomain(host)) }
+            }
+        }
+        return domains
+    }
+
     func load(_ url: URL) {
         // The app asked for this, so trust it and every redirect it triggers -- that is
         // what lets a mirror 302 to its canonical domain.
@@ -192,7 +209,7 @@ extension WebController: WKNavigationDelegate {
         // A page sending the window somewhere else entirely, which is what a redirect
         // ad does on the first click anywhere.
         let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
-        if isMainFrame {
+        if isMainFrame, url.scheme?.lowercased() != "magnet" {
             // A click starts a NEW chain, aimed at wherever the link said it went. The
             // redirects that follow are then judged against that, which is what catches
             // an on-site redirector bouncing the window off to an advertiser.
@@ -200,17 +217,35 @@ extension WebController: WKNavigationDelegate {
                 chain = RedirectGuard.Chain(appInitiated: false,
                                             anchorDomain: url.host.map(registrableDomain))
             }
-            if RedirectGuard.isRedirectAd(from: webView.url,
-                                          to: url,
-                                          // Only `.other` is script-initiated. Back, forward, reload and form
-                                          // submissions are the user, and a back button that refuses
-                                          // to leave the current domain is worse than any advert.
-                                          scriptInitiated: navigationAction.navigationType == .other,
-                                          navigationInFlight: navigationInFlight,
-                                          chain: chain) {
-                showToast("Blocked a redirect to \(url.host ?? "another site")", isError: false)
-                decisionHandler(.cancel)
-                return
+            let kind: RedirectGuard.NavigationKind
+            switch navigationAction.navigationType {
+            case .linkActivated, .formSubmitted, .formResubmitted: kind = .userLink
+            case .backForward, .reload: kind = .history
+            default: kind = .script
+            }
+
+            // Back and forward are always the user, and a browser that will not go back
+            // is worse than any advert.
+            if kind != .history {
+                let confirmed = pendingConfirm.flatMap {
+                    Date().timeIntervalSince($0.at) < Self.confirmWindow ? $0.url : nil
+                }
+                switch RedirectGuard.decide(from: webView.url, to: url, navigationType: kind,
+                                            chain: chain, known: knownDomains(for: url),
+                                            confirmedTarget: confirmed) {
+                case .allow:
+                    pendingConfirm = nil
+                case .block:
+                    showToast("Blocked a redirect to \(url.host ?? "another site")", isError: false)
+                    decisionHandler(.cancel)
+                    return
+                case .confirm:
+                    pendingConfirm = (url, Date())
+                    showToast("\(url.host ?? "That site") is not one of yours \u{2014} "
+                              + "click again to go there", isError: false)
+                    decisionHandler(.cancel)
+                    return
+                }
             }
         }
 
