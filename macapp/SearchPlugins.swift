@@ -13,8 +13,19 @@ struct SearchPluginSource: Identifiable, Equatable {
     /// bookmarked at whichever domain was alive that week.
     let domains: [String]
     let source: String
+    /// Other engine names that already cover this site.
+    ///
+    /// Two plugins for one site is not an error qBittorrent reports -- it just returns
+    /// every result twice. Checked before installing so a client that already has the
+    /// other one is left alone.
+    var alsoInstalledAs: [String] = []
 
     var sourceURL: URL? { URL(string: source) }
+
+    /// True when this client already covers the site, under any known engine name.
+    func isCovered(by installed: Set<String>) -> Bool {
+        installed.contains(id) || alsoInstalledAs.contains(where: installed.contains)
+    }
 }
 
 /// The sites Magnet knows how to hand to qBittorrent's search.
@@ -33,10 +44,14 @@ enum SearchPluginCatalogue {
             domains: ["1337x.to", "1337x.st", "x1337x.cc", "x1337x.ws", "x1337x.eu",
                       "x1337x.se", "1337x.is", "1337x.gd"],
             source: "https://raw.githubusercontent.com/v1k45/1337x-qBittorrent-search-plugin/master/leetx.py"),
+        // The official plugin already targets eztvx.to and is ahead of the community
+        // one, so there is nothing to gain by shipping a second EZTV engine and a
+        // doubled result list to lose.
         SearchPluginSource(
-            id: "eztvx", site: "EZTV",
+            id: "eztv", site: "EZTV",
             domains: ["eztvx.to", "eztv.re", "eztv.wf", "eztv.tf", "eztv.yt", "eztv.ch"],
-            source: "https://raw.githubusercontent.com/DrPurp/eztvx-qbittorrent-plugin/main/eztvx.py"),
+            source: "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/eztv.py",
+            alsoInstalledAs: ["eztvx"]),
         SearchPluginSource(
             id: "yts", site: "YTS",
             domains: ["yts.mx", "yts.bz", "yts.rs", "yts.lt", "yts.am", "yts.pm"],
@@ -44,7 +59,8 @@ enum SearchPluginCatalogue {
         SearchPluginSource(
             id: "nyaasi", site: "Nyaa",
             domains: ["nyaa.si", "nyaa.iss.one", "nyaa.land"],
-            source: "https://raw.githubusercontent.com/MadeOfMagicAndWires/qBit-plugins/master/engines/nyaasi.py"),
+            source: "https://raw.githubusercontent.com/MadeOfMagicAndWires/qBit-plugins/master/engines/nyaasi.py",
+            alsoInstalledAs: ["nyaa"]),
         SearchPluginSource(
             id: "rutracker", site: "RuTracker",
             domains: ["rutracker.org", "rutracker.net", "rutracker.nl"],
@@ -90,11 +106,12 @@ enum SearchPluginCatalogue {
         SearchPluginSource(
             id: "piratebay", site: "The Pirate Bay",
             domains: ["thepiratebay.org", "thepiratebay10.org", "tpb.party", "piratebayproxy.live"],
-            source: "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/piratebay.py"),
+            source: "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/piratebay.py",
+            alsoInstalledAs: ["thepiratebay"]),
         SearchPluginSource(
             id: "solidtorrents", site: "Solid Torrents",
             domains: ["solidtorrents.to", "solidtorrents.net", "solidtorrents.eu"],
-            source: "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/solidtorrents.py"),
+            source: "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/solidtorrents.py"),
         SearchPluginSource(
             id: "bitsearch", site: "BitSearch",
             domains: ["bitsearch.to"],
@@ -197,7 +214,7 @@ struct SearchPluginPlan: Equatable {
             guard !seenPlugins.contains(plugin.id) else { continue }
             seenPlugins.insert(plugin.id)
 
-            if installed.contains(plugin.id) { plan.covered.append(plugin) }
+            if plugin.isCovered(by: installed) { plan.covered.append(plugin) }
             else { plan.install.append(plugin) }
         }
         return plan

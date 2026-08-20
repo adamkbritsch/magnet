@@ -53,6 +53,30 @@ for plugin in all {
 check("every engine name matches its file name", misnamed.isEmpty,
       misnamed.joined(separator: ", "))
 
+// Where qBittorrent ships its own plugin, that is the one to install. A community
+// fork under the SAME engine name does not sit alongside the official one -- it
+// replaces it, which on one of these was a five-version downgrade of a working
+// plugin, with no error and nothing in the UI to show it had happened.
+let officialEngines: Set<String> = ["eztv", "jackett", "limetorrents", "piratebay",
+                                    "solidtorrents", "torlock", "torrentproject",
+                                    "torrentscsv"]
+let officialPrefix = "https://raw.githubusercontent.com/qbittorrent/search-plugins/"
+let forks = all.filter { officialEngines.contains($0.id) && !$0.source.hasPrefix(officialPrefix) }
+check("engines qBittorrent ships come from qBittorrent",
+      forks.isEmpty, forks.map(\.id).joined(separator: ", "))
+
+// Two plugins for one site is not an error the client reports -- it just returns
+// everything twice.
+var aliasClashes: [String] = []
+let everyName = Set(all.map(\.id))
+for plugin in all {
+    for alias in plugin.alsoInstalledAs where everyName.contains(alias) {
+        aliasClashes.append("\(plugin.id) claims \(alias), which is also shipped")
+    }
+}
+check("no entry claims another catalogue entry's name", aliasClashes.isEmpty,
+      aliasClashes.joined(separator: ", "))
+
 print("Test 2 - a site with a plugin that is not installed gets one")
 var plan = SearchPluginPlan.make(sites: [u("https://nyaa.si/")], installed: [])
 check("one install planned", plan.install.map(\.id) == ["nyaasi"], "\(plan.install.map(\.id))")
@@ -64,6 +88,18 @@ plan = SearchPluginPlan.make(sites: [u("https://nyaa.si/")], installed: ["nyaasi
 check("no install planned", plan.install.isEmpty)
 check("counted as covered", plan.covered.map(\.id) == ["nyaasi"])
 check("the plan is a no-op", plan.isEmpty)
+
+print("Test 3b - a site already covered under a DIFFERENT engine name is left alone")
+// Measured against a real client: it had the official `eztv` installed, and the
+// catalogue once shipped the community `eztvx`. Nothing said they were the same site,
+// so both would have been enabled and every EZTV result returned twice.
+plan = SearchPluginPlan.make(sites: [u("https://eztvx.to/")], installed: ["eztvx"])
+check("the other EZTV plugin counts as covered", plan.install.isEmpty, "\(plan.install.map(\.id))")
+check("and is reported as covered, not missing", plan.covered.map(\.id) == ["eztv"])
+plan = SearchPluginPlan.make(sites: [u("https://nyaa.si/")], installed: ["nyaa"])
+check("the same holds for Nyaa", plan.install.isEmpty, "\(plan.install.map(\.id))")
+plan = SearchPluginPlan.make(sites: [u("https://thepiratebay.org/")], installed: ["thepiratebay"])
+check("and for The Pirate Bay", plan.install.isEmpty, "\(plan.install.map(\.id))")
 
 print("Test 4 - a site with no published plugin is named, not silently skipped")
 plan = SearchPluginPlan.make(sites: [u("https://steamrip.com/"), u("https://knaben.org/")],
