@@ -230,7 +230,16 @@ if [[ "${1:-}" == "--install" ]]; then
   echo "==> Installing to $INSTALLED"
   rm -rf "$INSTALLED"
   ditto "$APP" "$INSTALLED"
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-    -f "$INSTALLED" >/dev/null 2>&1 || true
-  echo "==> Installed"
+  LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  # Exactly one launchable bundle, or the Dock is free to open whichever it likes.
+  #
+  # Two bundles sharing one id is the documented trap, and leaving the build output
+  # behind is how you get one: the Dock ends up aimed at dist/, `quit` closes only
+  # that copy, and a rebuild overwrites the FILE while the running process keeps the
+  # inode it opened -- so every rebuild appears to do nothing, with no error anywhere.
+  # Cost me an hour of "relaunch to pick it up" that could not have worked.
+  "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
+  rm -rf "$APP"
+  "$LSREGISTER" -f "$INSTALLED" >/dev/null 2>&1 || true
+  echo "==> Installed (build output removed, so only one bundle can be launched)"
 fi
