@@ -6,6 +6,7 @@ struct RootView: View {
     @StateObject private var web = WebController()
     @StateObject private var bookmarks = BookmarkStore()
     @StateObject private var blocker = ContentBlocker()
+    @StateObject private var plugins = SearchPluginSync()
     @State private var generation = 0
     @ObservedObject private var settings = AppSettings.shared
     @State private var showSettings = false
@@ -22,7 +23,8 @@ struct RootView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showSettings) {
-            SettingsPane(routes: routes, bookmarks: bookmarks, blocker: blocker)
+            SettingsPane(routes: routes, bookmarks: bookmarks, blocker: blocker,
+                         plugins: plugins)
         }
         .task {
             guard !started else { return }
@@ -78,6 +80,8 @@ struct RootView: View {
         }
         .onChange(of: settings.unifiedStyleEnabled) { _, _ in restyle() }
         .onChange(of: settings.siteZoom) { _, _ in web.applyZoom() }
+        .modifier(PluginSyncTriggers(bookmarks: bookmarks, settings: settings,
+                                     sync: syncPlugins))
     }
 
     @ViewBuilder
@@ -162,6 +166,36 @@ struct RootView: View {
     }
 
     private func goHome() { if let homeURL { web.load(homeURL) } }
+
+    private func syncPlugins() {
+        plugins.syncIfNeeded(sites: bookmarks.visible.map(\.url), alsoKnownAs: Self.mirrorDomains)
+    }
+
+    /// Every domain a site is also known by, so a chip saved at last month's mirror
+    /// still finds its plugin.
+    static func mirrorDomains(_ url: URL) -> [String] {
+        guard let set = MirrorDirectory.shared.set(owning: url) else { return [] }
+        return set.candidates.compactMap(\.host)
+    }
+}
+
+/// A site added to the bar becomes a search plugin in qBittorrent.
+///
+/// Driven off the bar rather than off the add button, so a site added on another
+/// machine, or one added before the client was configured, is picked up too. Kept in
+/// its own modifier because the root view's chain is already long enough that the
+/// type checker gives up on it.
+private struct PluginSyncTriggers: ViewModifier {
+    @ObservedObject var bookmarks: BookmarkStore
+    @ObservedObject var settings: AppSettings
+    let sync: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: bookmarks.visible.map(\.id)) { _, _ in sync() }
+            .onChange(of: settings.qbBaseURL) { _, _ in sync() }
+            .onChange(of: settings.syncSearchPlugins) { _, on in if on { sync() } }
+    }
 }
 
 // MARK: - Top bar
@@ -722,6 +756,7 @@ struct SettingsPane: View {
     @ObservedObject var routes: RouteStore
     @ObservedObject var bookmarks: BookmarkStore
     @ObservedObject var blocker: ContentBlocker
+    @ObservedObject var plugins: SearchPluginSync
     @ObservedObject private var settings = AppSettings.shared
     @Environment(\.dismiss) private var dismiss
     @State private var tab: SettingsTab = .sites
@@ -735,7 +770,7 @@ struct SettingsPane: View {
                 ConnectionTab(routes: routes, settings: settings)
                     .tabItem { Label(SettingsTab.connection.title, systemImage: SettingsTab.connection.symbol) }
                     .tag(SettingsTab.connection)
-                ClientTab(settings: settings)
+                ClientTab(settings: settings, plugins: plugins, bookmarks: bookmarks)
                     .tabItem { Label(SettingsTab.client.title, systemImage: SettingsTab.client.symbol) }
                     .tag(SettingsTab.client)
                 DownloadsTab(settings: settings)
@@ -971,8 +1006,27 @@ private struct ConnectionTab: View {
 
 private struct ClientTab: View {
     @ObservedObject var settings: AppSettings
+    @ObservedObject var plugins: SearchPluginSync
+    @ObservedObject var bookmarks: BookmarkStore
     @State private var editingCredentials = false
     @State private var testResult: String?
+
+    /// What each site in the bar maps to, worked out locally so the list is honest
+    /// before anything is installed rather than only after a sync has run.
+    private var coverage: [(site: String, plugin: String?)] {
+        var seen = Set<String>()
+        var rows: [(String, String?)] = []
+        for bm in bookmarks.visible {
+            guard let host = bm.url.host else { continue }
+            let domain = registrableDomain(host)
+            guard !seen.contains(domain) else { continue }
+            seen.insert(domain)
+            let candidates = [domain] + RootView.mirrorDomains(bm.url).map { registrableDomain($0) }
+            let match = candidates.lazy.compactMap { SearchPluginCatalogue.plugin(forDomain: $0) }.first
+            rows.append((domain, match?.site))
+        }
+        return rows.map { (site: $0.0, plugin: $0.1) }
+    }
 
     var body: some View {
         ScrollView {
@@ -996,6 +1050,46 @@ private struct ClientTab: View {
                            hint: "Change this to share one saved sign-in with a dedicated qBittorrent app.") {
                     MonoField(placeholder: "\(AppSettings.bundleID).qbittorrent",
                               text: $settings.qbKeychainService)
+                }
+
+                Divider()
+
+                Toggle("Add a search plugin when a site is added",
+                       isOn: $settings.syncSearchPlugins)
+                    .font(.system(size: 12, weight: .medium))
+                Text("Sites in the bar are matched against a built-in list of published "
+                     + "qBittorrent search plugins, and the missing ones are installed. "
+                     + "Only these addresses are ever fetched -- nothing a page suggests. "
+                     + "Plugins are never removed.")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Button(plugins.busy ? "Syncing\u{2026}" : "Sync Now") {
+                        plugins.syncNow(sites: bookmarks.visible.map(\.url),
+                                        alsoKnownAs: RootView.mirrorDomains)
+                    }
+                    .disabled(plugins.busy || settings.qbBase == nil)
+                    if !plugins.status.isEmpty {
+                        Text(plugins.status).font(.system(size: 11)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if !coverage.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(coverage, id: \.site) { row in
+                            HStack(spacing: 6) {
+                                Text(row.site)
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .frame(width: 190, alignment: .leading)
+                                Text(row.plugin ?? "no published plugin")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(row.plugin == nil ? .tertiary : .secondary)
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
                 }
 
                 Divider()

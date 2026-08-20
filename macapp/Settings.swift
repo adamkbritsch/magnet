@@ -89,6 +89,12 @@ final class AppSettings: ObservableObject {
     /// dedicated qBittorrent client app.
     @Published var qbKeychainService: String { didSet { put("qb.keychainService", qbKeychainService) } }
 
+    /// Install the search plugin for a site when the site is added to the bar.
+    ///
+    /// On by default, but it does nothing at all until a client is configured, so it
+    /// cannot surprise anyone who has not set one up.
+    @Published var syncSearchPlugins: Bool { didSet { put("qb.syncPlugins", syncSearchPlugins) } }
+
     var qbBase: URL? { URL(string: qbBaseURL.trimmingCharacters(in: .whitespaces)) }
     var qbConfigured: Bool { qbBase != nil }
 
@@ -148,8 +154,8 @@ final class AppSettings: ObservableObject {
     /// How large sites are drawn. Trackers are dense pages laid out for monitors that
     /// are no longer the ones anyone owns, so the default is a little over life size.
     @Published var siteZoom: Double { didSet { put("site.zoom", siteZoom) } }
-    static let defaultSiteZoom: Double = 1.05
-    static let siteZoomRange: ClosedRange<Double> = 0.5...3.0
+    nonisolated static let defaultSiteZoom: Double = 1.05
+    nonisolated static let siteZoomRange: ClosedRange<Double> = 0.5...3.0
 
     /// Clamped on the way out. A stored zero -- from a cleared field, or a hand-edited
     /// preference -- would draw an invisible page, and Settings is reached THROUGH that
@@ -182,6 +188,7 @@ final class AppSettings: ObservableObject {
             ?? "\(AppSettings.bundleID).proxy"
 
         qbBaseURL = d.string(forKey: "qb.baseURL") ?? ""
+        syncSearchPlugins = (d.object(forKey: "qb.syncPlugins") as? Bool) ?? true
         qbKeychainService = d.string(forKey: "qb.keychainService")
             ?? "\(AppSettings.bundleID).qbittorrent"
 
@@ -224,7 +231,8 @@ final class AppSettings: ObservableObject {
     func resetAll() {
         for key in ["home.url", "bookmarks.folderName", "bookmarks.infraHosts",
                     "proxy.host", "proxy.port", "proxy.keychainService",
-                    "qb.baseURL", "qb.keychainService",
+                    "qb.baseURL", "qb.keychainService", "qb.syncPlugins",
+                    "qb.plugins.signature", "qb.plugins.failed",
                     "nas.host", "nas.share", "nas.user", "archive.root",
                     "archive.localPath", "archive.folders",
                     "mirrors.curated", "mirrors.fmhy.enabled", "mirrors.refreshHours",

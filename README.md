@@ -165,6 +165,22 @@ Magnet and `.torrent` links are posted to a qBittorrent Web API rather than hand
 to another application. Point it at a reverse proxy in front of the client rather
 than the client's own port, and it works on networks that block that port.
 
+### Adding a site adds its search plugin
+
+qBittorrent can search sites itself, but only through a plugin per site, installed by
+hand from a wiki of community links. Magnet keeps the two in step: add a site to the
+bar and the plugin for it is installed into the client, on launch and whenever the bar
+changes.
+
+Only a built-in list of addresses is ever fetched — never one a page suggested — and
+plugins are never removed, because hiding a chip for an afternoon is a reversible
+action and uninstalling is not. Sites with no published plugin are named rather than
+passed over, so "nothing to do" cannot be mistaken for "everything is searchable".
+
+A plugin URL that has rotted fails silently: the client accepts the request, fetches
+nothing, and ends up without the plugin. `tools/tests/run.sh --live` fetches every
+address in the catalogue and checks it is still a working plugin.
+
 ### Downloads are filed, not dumped
 
 Any site in the bar is a download source, so bookmarking one is all it takes. Files
