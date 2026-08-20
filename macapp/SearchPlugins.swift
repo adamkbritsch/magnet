@@ -189,6 +189,17 @@ struct SearchPluginPlan: Equatable {
 
     var isEmpty: Bool { install.isEmpty }
 
+    /// A bare IP or a bare hostname is a box on the network -- a NAS page, a dashboard,
+    /// a router -- not a site anyone publishes a search plugin for. Listing those as
+    /// "no published plugin" would bury the sites that genuinely lack one.
+    static func isSearchableSite(_ host: String) -> Bool {
+        if host.contains(":") { return false }                       // IPv6
+        let labels = host.split(separator: ".")
+        guard labels.count >= 2 else { return false }                // localhost, a bare name
+        guard let last = labels.last else { return false }
+        return last.contains { !$0.isNumber }                        // IPv4 ends in digits
+    }
+
     /// - Parameters:
     ///   - sites: every site in the bar.
     ///   - installed: engine names qBittorrent already reports, whatever their state.
@@ -202,7 +213,7 @@ struct SearchPluginPlan: Equatable {
         var seenSites = Set<String>()
 
         for site in sites {
-            guard let host = site.host else { continue }
+            guard let host = site.host, isSearchableSite(host) else { continue }
             let primary = registrableDomain(host)
             guard !seenSites.contains(primary) else { continue }
             seenSites.insert(primary)
