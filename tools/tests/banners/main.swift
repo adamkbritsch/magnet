@@ -102,7 +102,10 @@ let here = URL(string: "https://tracker.example/browse")!
 let advert = URL(string: "https://someadvertiser.example/offer")!
 let knownSites: Set<String> = ["tracker.example", "othertracker.example"]
 
-func clickChain(_ d: String) -> RedirectGuard.Chain { .init(appInitiated: false, anchorDomain: d) }
+/// The chain state AT THE MOMENT a navigation is judged: anchored at the page you are
+/// on, never at the destination being decided. Aiming it at the destination first was
+/// the bug -- `anchor == destination` then always held and every click was allowed.
+func onPage(_ d: String) -> RedirectGuard.Chain { .init(appInitiated: false, anchorDomain: d) }
 let appChain = RedirectGuard.Chain(appInitiated: true, anchorDomain: "tracker.example")
 
 func decide(_ dest: URL,
@@ -116,39 +119,46 @@ func decide(_ dest: URL,
 // The case two block-list heuristics failed to catch: the click is same-domain and
 // ordinary, and the SERVER redirects out of it.
 check("an on-site redirector bouncing the window off-site is blocked",
-      decide(advert, .script, chain: clickChain("tracker.example")) == .block)
+      decide(advert, .script, chain: onPage("tracker.example")) == .block)
 check("a page moving itself somewhere unknown is blocked",
-      decide(advert, .script, chain: clickChain("tracker.example")) == .block)
+      decide(advert, .script, chain: onPage("tracker.example")) == .block)
 check("a page moving itself cannot be confirmed by clicking",
-      decide(advert, .script, chain: clickChain("tracker.example")) != .confirm)
+      decide(advert, .script, chain: onPage("tracker.example")) != .confirm)
 
 print("\nWhat must still work")
 check("a mirror redirect in an app-initiated chain is allowed",
       decide(URL(string: "https://tracker-canonical.example/")!, .script, chain: appChain) == .allow)
 check("moving around the current site is allowed",
       decide(URL(string: "https://tracker.example/page/2")!, .script,
-             chain: clickChain("tracker.example")) == .allow)
+             chain: onPage("tracker.example")) == .allow)
 check("a subdomain of the current site is allowed",
       decide(URL(string: "https://cdn.tracker.example/x")!, .script,
-             chain: clickChain("tracker.example")) == .allow)
+             chain: onPage("tracker.example")) == .allow)
 check("another site from your own bar is allowed outright",
       decide(URL(string: "https://othertracker.example/")!, .userLink,
-             chain: clickChain("othertracker.example")) == .allow)
-check("a link is allowed to reach where it said it went",
-      decide(advert, .userLink, chain: clickChain("someadvertiser.example")) == .allow)
+             chain: onPage("othertracker.example")) == .allow)
+// REGRESSION. This previously asserted `.allow`, by passing a chain already aimed at
+// the advertiser -- which is precisely the mistake the code was making, so the suite
+// stayed green while the app kept redirecting. A click is judged against where it came
+// FROM, not where it is going.
+check("a click to an unknown site is judged against the page it came from",
+      decide(advert, .userLink, chain: onPage("tracker.example")) == .confirm)
+check("once permitted, that destination's own redirects are allowed",
+      decide(URL(string: "https://someadvertiser.example/step2")!, .script,
+             chain: onPage("someadvertiser.example")) == .allow)
 check("a magnet link is left alone", decide(URL(string: "magnet:?xt=urn:btih:a")!, .script,
-                                            chain: clickChain("tracker.example")) == .allow)
+                                            chain: onPage("tracker.example")) == .allow)
 
 print("\nA deliberate outbound link is possible, just not automatic")
 check("clicking through to an unknown site asks first",
       decide(URL(string: "https://somewhere-new.example/")!, .userLink,
-             chain: clickChain("tracker.example")) == .confirm)
+             chain: onPage("tracker.example")) == .confirm)
 check("clicking the same link again goes there",
       decide(URL(string: "https://somewhere-new.example/")!, .userLink,
-             chain: clickChain("tracker.example"),
+             chain: onPage("tracker.example"),
              confirmed: URL(string: "https://somewhere-new.example/")!) == .allow)
 check("confirming one destination does not admit a different one",
-      decide(advert, .script, chain: clickChain("tracker.example"),
+      decide(advert, .script, chain: onPage("tracker.example"),
              confirmed: URL(string: "https://somewhere-new.example/")!) == .block)
 
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
