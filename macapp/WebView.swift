@@ -1,0 +1,365 @@
+import AppKit
+import SwiftUI
+import WebKit
+
+/// Compiles the converted uBlock Origin lists into WebKit's native content blocker.
+///
+/// WKWebView cannot run a Firefox extension, but WebKit ships the same engine
+/// Safari content blockers use. Compilation is cached on disk by identifier, so the
+/// ~5s first run happens once per list version and later launches are instant.
+@MainActor
+final class ContentBlocker: ObservableObject {
+    @Published private(set) var ruleLists: [WKContentRuleList] = []
+    @Published private(set) var status: String = "Loading filters…"
+    @Published private(set) var ruleCount: Int = 0
+
+    private let store = WKContentRuleListStore.default()
+
+    func load() async {
+        guard let store else { status = "Content blocker unavailable"; return }
+        guard let resources = Bundle.main.resourceURL else { return }
+
+        let files = ((try? FileManager.default.contentsOfDirectory(atPath: resources.path)) ?? [])
+            .filter { $0.hasPrefix("blocklist-") && $0.hasSuffix(".json") }
+            .sorted()
+        if files.isEmpty { status = "No filter lists bundled"; return }
+
+        var loaded: [WKContentRuleList] = []
+        var total = 0
+        for file in files {
+            let url = resources.appendingPathComponent(file)
+            // Version the identifier by content size so a rebuilt list recompiles
+            // instead of silently serving the stale cached bytecode.
+            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let size = (attrs?[.size] as? Int) ?? 0
+            let identifier = "\(file).\(size)"
+
+            if let cached = try? await store.contentRuleList(forIdentifier: identifier) {
+                loaded.append(cached)
+                continue
+            }
+            guard let json = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            total += json.reduce(0) { $1 == "{" ? $0 + 1 : $0 }
+            if let compiled = try? await store.compileContentRuleList(forIdentifier: identifier,
+                                                                      encodedContentRuleList: json) {
+                loaded.append(compiled)
+            }
+        }
+        ruleLists = loaded
+        ruleCount = total
+        status = loaded.isEmpty ? "Filters failed to load" : "\(loaded.count) filter lists active"
+    }
+}
+
+@MainActor
+final class WebController: NSObject, ObservableObject {
+    @Published private(set) var isLoading = false
+    @Published private(set) var progress: Double = 0
+    @Published private(set) var canGoBack = false
+    @Published private(set) var toast: String?
+    @Published private(set) var toastIsError = false
+    /// True while Cloudflare's interstitial is on screen. It renders 1337x's own
+    /// nav bar with zero listings for ~6s, which reads as a broken page rather than
+    /// a loading one — so the UI covers it instead of showing a half-page.
+    @Published private(set) var isChallenged = false
+
+    /// Reported when a load fails in a way that suggests the route is blocked.
+    var onLoadFailure: ((String) -> Void)?
+
+    private(set) var webView: WKWebView!
+    private var observations: [NSKeyValueObservation] = []
+    private var toastClear: DispatchWorkItem?
+    private var challengeTimeout: DispatchWorkItem?
+    private let sender = MagnetSender()
+
+    /// Where magnet links are pushed. Often a reverse proxy in front of the client
+    /// rather than the client itself, which is what makes this work on networks that
+    /// block the client's own port. Nil until configured.
+    var qbBase: URL? { AppSettings.shared.qbBase }
+
+    override init() {
+        super.init()
+        rebuild(proxies: [], ruleLists: [])
+    }
+
+    /// WKWebView reads proxy settings when its data store is set up, so switching
+    /// routes means building a new web view. Cookies and the content blocker are
+    /// unaffected — the data store is the shared default one.
+    func rebuild(proxies: [ProxyConfiguration], ruleLists: [WKContentRuleList]) {
+        let config = WKWebViewConfiguration()
+        let store = WKWebsiteDataStore.default()
+        store.proxyConfigurations = proxies
+        config.websiteDataStore = store
+        for list in ruleLists { config.userContentController.add(list) }
+
+        // Self-hosted banners, which no filter list can reach. Added regardless of the
+        // restyling toggle: it is blocking, not decoration.
+        config.userContentController.addUserScript(BannerBlocker.userScript())
+
+        // One stylesheet across every site, when asked for. Injected here rather than
+        // per-navigation so it is present before the first paint.
+        if AppSettings.shared.unifiedStyleEnabled,
+           let style = SiteStyle.userScript(css: AppSettings.shared.effectiveSiteCSS) {
+            config.userContentController.addUserScript(style)
+        }
+
+        let old = webView
+        let fresh = WKWebView(frame: .zero, configuration: config)
+        fresh.allowsBackForwardNavigationGestures = true
+        fresh.allowsMagnification = true
+        fresh.underPageBackgroundColor = .windowBackgroundColor
+        // Trackers serve different (worse) pages to anything that looks automated.
+        fresh.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+        fresh.navigationDelegate = self
+        fresh.uiDelegate = self
+
+        observations = [
+            fresh.observe(\.estimatedProgress, options: [.new]) { [weak self] v, _ in
+                Task { @MainActor in self?.progress = v.estimatedProgress }
+            },
+            fresh.observe(\.isLoading, options: [.new]) { [weak self] v, _ in
+                Task { @MainActor in self?.isLoading = v.isLoading }
+            },
+            fresh.observe(\.canGoBack, options: [.new]) { [weak self] v, _ in
+                Task { @MainActor in self?.canGoBack = v.canGoBack }
+            },
+        ]
+        webView = fresh
+        old?.stopLoading()
+    }
+
+    /// Whatever is on screen, so a rebuild can put the user back where they were.
+    var currentURL: URL? { webView.url }
+
+    func load(_ url: URL) { webView.load(URLRequest(url: url)) }
+    func reload() { webView.reload() }
+    func goBack() { webView.goBack() }
+    func stop() { webView.stopLoading() }
+
+    func showToast(_ text: String, isError: Bool) {
+        toast = text
+        toastIsError = isError
+        toastClear?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.toast = nil }
+        toastClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    }
+
+    fileprivate func handleMagnet(_ url: URL) {
+        let name = MagnetSender.displayName(for: url)
+        showToast("Sending \(name)…", isError: false)
+        guard let base = qbBase else {
+            showToast("No torrent client configured \u{2014} open Settings", isError: true)
+            return
+        }
+        QBCredentialStore.withCredentials { [weak self] creds in
+            guard let self else { return }
+            guard let creds else {
+                self.showToast("No qBittorrent sign-in saved — open Settings", isError: true)
+                return
+            }
+            Task {
+                let result = await self.sender.send(url, base: base, credentials: creds)
+                await MainActor.run {
+                    switch result {
+                    case .added(let n): self.showToast("Sent to qBittorrent: \(n)", isError: false)
+                    case .failed(let why): self.showToast("Couldn't send: \(why)", isError: true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+extension WebController: WKNavigationDelegate {
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else { decisionHandler(.allow); return }
+
+        // The whole point of the old Torrent Control extension, done natively.
+        if url.scheme?.lowercased() == "magnet" {
+            handleMagnet(url)
+            decisionHandler(.cancel)
+            return
+        }
+        // A .torrent file link is the other way trackers hand over a torrent.
+        if url.pathExtension.lowercased() == "torrent" {
+            handleMagnet(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        // Anna's Archive serves its files as ordinary navigations, so without this
+        // they either render as junk or silently do nothing.
+        if DownloadManager.shared.shouldCapture(navigationResponse, pageURL: webView.url) {
+            decisionHandler(.download)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView,
+                 navigationResponse: WKNavigationResponse,
+                 didBecome download: WKDownload) {
+        DownloadManager.shared.attach(download, page: webView.url)
+    }
+
+    func webView(_ webView: WKWebView,
+                 navigationAction: WKNavigationAction,
+                 didBecome download: WKDownload) {
+        DownloadManager.shared.attach(download, page: webView.url)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // The challenge page reloads itself when solved, so this fires again with
+        // the real page and clears the flag.
+        webView.evaluateJavaScript("document.title") { [weak self] value, _ in
+            guard let self else { return }
+            let title = ((value as? String) ?? "").lowercased()
+            let challenged = title.contains("just a moment")
+                || title.contains("attention required")
+                || title.contains("checking your browser")
+            self.isChallenged = challenged
+            self.challengeTimeout?.cancel()
+            if challenged {
+                // Never hold the cover indefinitely — if the challenge stalls, show
+                // the page so the user can interact with it (some need a click).
+                let work = DispatchWorkItem { [weak self] in self?.isChallenged = false }
+                self.challengeTimeout = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        isChallenged = false
+        report(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        isChallenged = false
+        report(error)
+    }
+
+    /// Failures that mean the domain itself is not answering, rather than the site
+    /// answering with something unwelcome. Only these justify moving to another
+    /// domain: an HTTP-level rejection -- a Cloudflare 403 above all -- still
+    /// proves the domain is alive, and switching away from it would be wrong.
+    private static let transportFailures: Set<Int> = [
+        NSURLErrorCannotFindHost,
+        NSURLErrorCannotConnectToHost,
+        NSURLErrorDNSLookupFailed,
+        NSURLErrorTimedOut,
+        NSURLErrorSecureConnectionFailed,
+        NSURLErrorNetworkConnectionLost,
+    ]
+
+    private func report(_ error: Error) {
+        let ns = error as NSError
+        if ns.code == NSURLErrorCancelled { return }
+        if ns.domain == "WebKitErrorDomain" && (ns.code == 101 || ns.code == 102) { return }
+
+        // A chip pointing at a site that has gone away used to do nothing at all:
+        // the only consumer of onLoadFailure is an empty closure, so the previous
+        // page simply stayed on screen and the click looked ignored. Only main-frame
+        // navigations reach here — blocked subresources never do — so this stays
+        // quiet during normal browsing.
+        let failing = (ns.userInfo[NSURLErrorFailingURLErrorKey] as? URL)
+            ?? (ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String).flatMap { URL(string: $0) }
+
+        // A site that publishes several domains gets moved to one that answers
+        // rather than reported as broken.
+        if ns.domain == NSURLErrorDomain, Self.transportFailures.contains(ns.code),
+           let failing, let set = MirrorDirectory.shared.set(owning: failing) {
+            showToast("\(set.name) is not answering on \(failing.host ?? "that domain") — trying another…",
+                      isError: false)
+            Task {
+                if let alternate = await MirrorDirectory.shared.alternate(for: failing) {
+                    self.load(alternate)
+                } else {
+                    self.showToast("No working domain found for \(set.name)", isError: true)
+                }
+            }
+            onLoadFailure?(ns.localizedDescription)
+            return
+        }
+
+        if let host = failing?.host {
+            showToast("\(host) — \(ns.localizedDescription)", isError: true)
+        } else {
+            showToast(ns.localizedDescription, isError: true)
+        }
+        onLoadFailure?(ns.localizedDescription)
+    }
+}
+
+extension WebController: WKUIDelegate {
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Tracker sites monetise with popunders. Unlike the qBittorrent app — where
+        // an unrecognised link is handed to the default browser — here that would
+        // BE the ad behaviour, so target=_blank is dropped entirely. Magnets are
+        // still caught, because they arrive through the navigation delegate.
+        if let url = navigationAction.request.url, url.scheme?.lowercased() == "magnet" {
+            handleMagnet(url)
+        }
+        // Download links commonly open in a new tab, so dropping every target=_blank
+        // would kill the download along with the ads. Loading it in THIS view keeps
+        // the popunder defence intact -- nothing new is opened, and the response
+        // still has to satisfy the download check to be captured. Deliberately not
+        // handed to the default browser: on a tracker page that IS the ad behaviour.
+        if let url = navigationAction.request.url,
+           DownloadManager.shared.mayBeDownload(url, pageURL: webView.url) {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        // Ad scripts love alert(). Swallow rather than interrupt.
+        completionHandler()
+    }
+}
+
+struct WebPane: NSViewRepresentable {
+    let controller: WebController
+    /// Changing this forces SwiftUI to swap in the rebuilt web view after a
+    /// route switch, which otherwise keeps showing the old one.
+    let generation: Int
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        attach(controller.webView, to: container)
+        return container
+    }
+
+    func updateNSView(_ container: NSView, context: Context) {
+        if controller.webView.superview !== container {
+            container.subviews.forEach { $0.removeFromSuperview() }
+            attach(controller.webView, to: container)
+        }
+    }
+
+    private func attach(_ web: WKWebView, to container: NSView) {
+        web.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(web)
+        NSLayoutConstraint.activate([
+            web.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            web.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            web.topAnchor.constraint(equalTo: container.topAnchor),
+            web.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+    }
+}

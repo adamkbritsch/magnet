@@ -1,0 +1,25 @@
+# Forward (CONNECT) proxy so the Mac app can reach Cloudflare-protected trackers
+# from networks that block them. A CONNECT tunnel passes raw TLS through to the
+# origin, so Cloudflare sees an ordinary browser handshake -- which is why a
+# REVERSE proxy cannot work here but this can.
+User nobody
+Group nogroup
+Port 8893
+Timeout 600
+MaxClients 100
+StartServers 5
+
+# CONNECT is only permitted to the standard TLS ports, so this cannot be used as
+# a general-purpose relay to arbitrary services.
+ConnectPort 443
+ConnectPort 563
+
+# Not internet-exposed (no port forward), but it IS reachable from the LAN and the
+# tailnet, and an open forward proxy would let anything relay through this house's
+# IP. Source-IP allowlisting is useless here because Docker SNATs published ports
+# to the bridge gateway, so authenticate instead.
+# The real file (gitignored) carries the generated password.
+BasicAuth adam CHANGE_ME
+
+DisableViaHeader Yes
+LogLevel Warning

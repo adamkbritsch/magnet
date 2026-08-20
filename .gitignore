@@ -1,0 +1,20 @@
+# Build output
+dist/
+*.app
+
+# Generated filter lists. Built by tools/build-blocklist.py on first build; 16 MB of
+# derived JSON does not belong in git, and a committed copy is stale immediately.
+macapp/blocklist-*.json
+macapp/blocklists-manifest.json
+tools/.cache/
+
+# Machine-specific configuration and secrets
+local.env
+tools/seed-local.sh
+# Reverses this machine's deployment, NAS side included
+rollback.sh
+
+# Working snapshots taken before risky edits
+backup/
+
+.DS_Store
