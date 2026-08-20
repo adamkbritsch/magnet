@@ -25,6 +25,7 @@ run sitestyle  "$(dirname "$0")/sitestyle/main.swift"  "$SRC/SiteStyle.swift"
 run render     "$(dirname "$0")/render/main.swift"     "$SRC/SiteStyle.swift"
 run banners    "$(dirname "$0")/banners/main.swift"    "$SRC/Domains.swift" "$SRC/Banners.swift"
 run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Downloads.swift"
+run network    "$(dirname "$0")/network/main.swift"    "$SRC/Domains.swift" "$SRC/Network.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Routes.swift"
 run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 if [ "${1:-}" = "--live" ]; then
   run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift"
@@ -36,7 +37,7 @@ fi
 # rather than left to review, because these creep back in one commit at a time.
 echo "=============== hygiene ==============="
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PATTERNS='britsch|adamkbritsch|dediseedbox|nl4422|100\.101\.182\.68|Plex Server|MediaVolume3'
+PATTERNS='britsch|adamkbritsch|dediseedbox|nl4422|100\.101\.182\.68|Plex Server|MediaVolume3|uvu\.edu|b4:0?c:25'
 LEAKS="$(cd "$ROOT" && grep -rInE "$PATTERNS" . \
   --exclude-dir=dist --exclude-dir=backup --exclude-dir=.git --exclude-dir=.cache \
   --exclude='local.env' --exclude='seed-local.sh' --exclude='blocklist-*.json' \
