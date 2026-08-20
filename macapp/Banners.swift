@@ -1,59 +1,76 @@
 import Foundation
 import WebKit
 
-/// Decides whether a navigation is a redirect ad.
+/// Decides what happens to a top-level navigation.
 ///
-/// These hijack NAVIGATION rather than inject content, so no filter list or stylesheet
-/// reaches them. Judged per CHAIN rather than per hop, because the technique that
-/// defeats a per-hop rule is the one these sites actually use: an on-site redirector.
-/// You click `site.example/out?url=...`, which is the same domain and therefore a
-/// perfectly ordinary link, and the SERVER then 302s you somewhere else entirely. Every
-/// individual hop looks defensible; only the chain gives it away.
+/// Two heuristics were tried and both were outflanked, so this inverts the model: it
+/// is an ALLOW-LIST. Anything leaving the sites you actually use is stopped unless you
+/// ask for it twice. A block-list can only ever chase the current technique --
+/// `window.open`, a scripted `location`, an on-site redirector 302ing out, a link that
+/// simply lies about where it goes -- and each fix reaches exactly the one variant it
+/// was written for. The set of places you meant to visit is small and knowable; the
+/// set of tricks is not.
 ///
-/// Pure, and separate from the web view, so the truth table can be tested directly --
-/// the cost of an over-eager rule here is a browser that refuses to go places.
+/// The cost is real and deliberate: a genuine outbound link is stopped too, the first
+/// time. Clicking it again inside the confirmation window lets it through, so nothing
+/// becomes impossible -- only automatic.
 enum RedirectGuard {
-    /// Where a navigation chain came from, carried across its redirects.
+    enum Decision: Equatable {
+        /// Somewhere you know, or somewhere you asked for.
+        case allow
+        /// A page moving itself somewhere unknown. Never reachable by clicking again,
+        /// because no click was involved.
+        case block
+        /// You clicked a link that leaves for somewhere unknown. Click it again to go.
+        case confirm
+    }
+
     struct Chain {
-        /// True when the app asked for this navigation: opening a chip, switching to a
-        /// mirror. Those chains are trusted through every redirect, which is what keeps
-        /// a site that 302s to its canonical domain working.
+        /// True when the app asked for the navigation. Trusted through every redirect,
+        /// which is what lets a mirror 302 to its canonical domain.
         var appInitiated: Bool
-        /// The registrable domain the chain was aimed at -- the href the user clicked,
-        /// or the URL the app requested. A chain is allowed to move within this.
+        /// The registrable domain the chain was aimed at. Redirects may move within it.
         var anchorDomain: String?
     }
 
-    static func isRedirectAd(from current: URL?,
-                             to destination: URL,
-                             scriptInitiated: Bool,
-                             navigationInFlight: Bool,
-                             chain: Chain) -> Bool {
+    /// - Parameters:
+    ///   - known: registrable domains of the sites in the bar, plus their mirrors.
+    ///   - confirmedTarget: a destination the user has just been warned about.
+    static func decide(from current: URL?,
+                       to destination: URL,
+                       navigationType: NavigationKind,
+                       chain: Chain,
+                       known: Set<String>,
+                       confirmedTarget: URL?) -> Decision {
         guard let scheme = destination.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
-              let destHost = destination.host else { return false }
+              let destHost = destination.host else { return .allow }
         let dest = registrableDomain(destHost)
 
         // The app asked for it, and so did every redirect it triggers.
-        if chain.appInitiated { return false }
+        if chain.appInitiated { return .allow }
+        // Where the chain was aimed, including that site's own redirects.
+        if let anchor = chain.anchorDomain, anchor == dest { return .allow }
+        // Still on the site being read.
+        if let current, let host = current.host, registrableDomain(host) == dest { return .allow }
+        // A site in the bar, or one of its mirrors: somewhere you already go.
+        if known.contains(dest) { return .allow }
+        // Already warned about this exact destination, and asked for again.
+        if let confirmedTarget, confirmedTarget == destination { return .allow }
 
-        // A link the user actually clicked is honoured -- but only to where it SAID it
-        // went. This is the hop that matters: the click is allowed, and the 302 that
-        // follows it out of that domain is not.
-        if !scriptInitiated {
-            return false
-        }
+        // Leaving for somewhere unknown. A click can be confirmed; a page moving itself
+        // cannot, because there is no intent behind it to confirm.
+        return navigationType == .userLink ? .confirm : .block
+    }
 
-        // Same site: pagination, search, login, the site's own interstitials.
-        if let current, let currentHost = current.host,
-           registrableDomain(currentHost) == dest { return false }
-
-        // Still inside whatever the user aimed at, including its own redirects.
-        if let anchor = chain.anchorDomain, anchor == dest { return false }
-
-        // A script or a redirect taking the window somewhere nobody asked for.
-        _ = navigationInFlight
-        return true
+    /// What started the navigation, reduced to what actually matters here.
+    enum NavigationKind {
+        /// A link the user clicked, or a form they submitted.
+        case userLink
+        /// Back, forward, reload: always the user, never an advert.
+        case history
+        /// Script, meta refresh, or a server redirect.
+        case script
     }
 }
 

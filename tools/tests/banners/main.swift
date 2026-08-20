@@ -97,47 +97,59 @@ check("a viewport-sized empty link is hidden", r.result["catcher"] == "none", r.
 check("a big link that holds a picture survives",
       r.result["bigcontent"] != "none", r.result["bigcontent"] ?? "?")
 
-print("\nRedirect navigations: the truth table")
+print("\nNavigation is an allow-list, not a block-list")
 let here = URL(string: "https://tracker.example/browse")!
 let advert = URL(string: "https://someadvertiser.example/offer")!
-let sameSite = URL(string: "https://tracker.example/page/2")!
+let knownSites: Set<String> = ["tracker.example", "othertracker.example"]
 
-func onSite(_ d: String) -> RedirectGuard.Chain { .init(appInitiated: false, anchorDomain: d) }
+func clickChain(_ d: String) -> RedirectGuard.Chain { .init(appInitiated: false, anchorDomain: d) }
 let appChain = RedirectGuard.Chain(appInitiated: true, anchorDomain: "tracker.example")
 
-// THE ONE THAT WAS LEAKING. You click tracker.example/out?url=... -- same domain, an
-// ordinary link -- and the server 302s you to an advertiser. Every hop looks fine.
+func decide(_ dest: URL,
+            _ kind: RedirectGuard.NavigationKind,
+            chain: RedirectGuard.Chain,
+            confirmed: URL? = nil) -> RedirectGuard.Decision {
+    RedirectGuard.decide(from: here, to: dest, navigationType: kind, chain: chain,
+                         known: knownSites, confirmedTarget: confirmed)
+}
+
+// The case two block-list heuristics failed to catch: the click is same-domain and
+// ordinary, and the SERVER redirects out of it.
 check("an on-site redirector bouncing the window off-site is blocked",
-      RedirectGuard.isRedirectAd(from: here, to: advert, scriptInitiated: true,
-                                 navigationInFlight: true, chain: onSite("tracker.example")))
+      decide(advert, .script, chain: clickChain("tracker.example")) == .block)
+check("a page moving itself somewhere unknown is blocked",
+      decide(advert, .script, chain: clickChain("tracker.example")) == .block)
+check("a page moving itself cannot be confirmed by clicking",
+      decide(advert, .script, chain: clickChain("tracker.example")) != .confirm)
 
-// The chain this must not break: the app opens a site that 302s to its own canonical
-// domain. Trusted because the app asked for it.
-check("a mirror redirect in an app-initiated chain is ALLOWED",
-      !RedirectGuard.isRedirectAd(from: here, to: URL(string: "https://tracker-canonical.example/")!,
-                                  scriptInitiated: true, navigationInFlight: true, chain: appChain))
-
-check("a link the user clicked is honoured",
-      !RedirectGuard.isRedirectAd(from: here, to: advert, scriptInitiated: false,
-                                  navigationInFlight: false, chain: onSite("someadvertiser.example")))
-check("and its own redirects, within where it said it went, are allowed",
-      !RedirectGuard.isRedirectAd(from: here, to: URL(string: "https://someadvertiser.example/b")!,
-                                  scriptInitiated: true, navigationInFlight: true,
-                                  chain: onSite("someadvertiser.example")))
-check("a script sending the window off-site after load is blocked",
-      RedirectGuard.isRedirectAd(from: here, to: advert, scriptInitiated: true,
-                                 navigationInFlight: false, chain: onSite("tracker.example")))
-check("staying on the same site is allowed",
-      !RedirectGuard.isRedirectAd(from: here, to: sameSite, scriptInitiated: true,
-                                  navigationInFlight: false, chain: onSite("tracker.example")))
+print("\nWhat must still work")
+check("a mirror redirect in an app-initiated chain is allowed",
+      decide(URL(string: "https://tracker-canonical.example/")!, .script, chain: appChain) == .allow)
+check("moving around the current site is allowed",
+      decide(URL(string: "https://tracker.example/page/2")!, .script,
+             chain: clickChain("tracker.example")) == .allow)
 check("a subdomain of the current site is allowed",
-      !RedirectGuard.isRedirectAd(from: here, to: URL(string: "https://cdn.tracker.example/x")!,
-                                  scriptInitiated: true, navigationInFlight: false,
-                                  chain: onSite("tracker.example")))
-check("a magnet link is not treated as a redirect",
-      !RedirectGuard.isRedirectAd(from: here, to: URL(string: "magnet:?xt=urn:btih:abc")!,
-                                  scriptInitiated: true, navigationInFlight: false,
-                                  chain: onSite("tracker.example")))
+      decide(URL(string: "https://cdn.tracker.example/x")!, .script,
+             chain: clickChain("tracker.example")) == .allow)
+check("another site from your own bar is allowed outright",
+      decide(URL(string: "https://othertracker.example/")!, .userLink,
+             chain: clickChain("othertracker.example")) == .allow)
+check("a link is allowed to reach where it said it went",
+      decide(advert, .userLink, chain: clickChain("someadvertiser.example")) == .allow)
+check("a magnet link is left alone", decide(URL(string: "magnet:?xt=urn:btih:a")!, .script,
+                                            chain: clickChain("tracker.example")) == .allow)
+
+print("\nA deliberate outbound link is possible, just not automatic")
+check("clicking through to an unknown site asks first",
+      decide(URL(string: "https://somewhere-new.example/")!, .userLink,
+             chain: clickChain("tracker.example")) == .confirm)
+check("clicking the same link again goes there",
+      decide(URL(string: "https://somewhere-new.example/")!, .userLink,
+             chain: clickChain("tracker.example"),
+             confirmed: URL(string: "https://somewhere-new.example/")!) == .allow)
+check("confirming one destination does not admit a different one",
+      decide(advert, .script, chain: clickChain("tracker.example"),
+             confirmed: URL(string: "https://somewhere-new.example/")!) == .block)
 
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)
