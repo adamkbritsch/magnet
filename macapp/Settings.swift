@@ -145,6 +145,20 @@ final class AppSettings: ObservableObject {
     /// always pre-filled with something real rather than a blank box.
     @Published var siteCSS: String { didSet { put("style.css", siteCSS) } }
 
+    /// How large sites are drawn. Trackers are dense pages laid out for monitors that
+    /// are no longer the ones anyone owns, so the default is a little over life size.
+    @Published var siteZoom: Double { didSet { put("site.zoom", siteZoom) } }
+    static let defaultSiteZoom: Double = 1.10
+    static let siteZoomRange: ClosedRange<Double> = 0.5...3.0
+
+    /// Clamped on the way out. A stored zero -- from a cleared field, or a hand-edited
+    /// preference -- would draw an invisible page, and Settings is reached THROUGH that
+    /// page, so there would be no way back.
+    var effectiveSiteZoom: Double {
+        min(max(siteZoom, AppSettings.siteZoomRange.lowerBound),
+            AppSettings.siteZoomRange.upperBound)
+    }
+
     var effectiveSiteCSS: String {
         guard styleTheme == SiteStyle.customThemeID else {
             return SiteStyle.css(for: styleTheme)
@@ -188,6 +202,7 @@ final class AppSettings: ObservableObject {
         unifiedStyleEnabled = d.bool(forKey: "style.enabled")
         styleTheme = d.string(forKey: "style.theme") ?? SiteStyle.themes[0].id
         siteCSS = d.string(forKey: "style.css") ?? ""
+        siteZoom = Config.siteZoom
 
         loading = false
     }
@@ -213,7 +228,7 @@ final class AppSettings: ObservableObject {
                     "nas.host", "nas.share", "nas.user", "archive.root",
                     "archive.localPath", "archive.folders",
                     "mirrors.curated", "mirrors.fmhy.enabled", "mirrors.refreshHours",
-                    "style.enabled", "style.css", "style.theme"] {
+                    "style.enabled", "style.css", "style.theme", "site.zoom"] {
             d.removeObject(forKey: key)
         }
     }
@@ -261,6 +276,14 @@ enum Config {
         let s = string("archive.localPath")
         if s.isEmpty { return AppSettings.defaultLocalRoot }
         return URL(fileURLWithPath: (s as NSString).expandingTildeInPath)
+    }
+
+    /// The zoom a launch would start at, clamped the same way the live setting is.
+    static var siteZoom: Double {
+        let stored = d.double(forKey: "site.zoom")
+        guard stored > 0 else { return AppSettings.defaultSiteZoom }
+        return min(max(stored, AppSettings.siteZoomRange.lowerBound),
+                   AppSettings.siteZoomRange.upperBound)
     }
 
     /// Folder for a category, by its raw value.

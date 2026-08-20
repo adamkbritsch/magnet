@@ -77,6 +77,7 @@ struct RootView: View {
             }
         }
         .onChange(of: settings.unifiedStyleEnabled) { _, _ in restyle() }
+        .onChange(of: settings.siteZoom) { _, _ in web.applyZoom() }
     }
 
     @ViewBuilder
@@ -1219,8 +1220,30 @@ private struct MirrorsTab: View {
 private struct AppearanceTab: View {
     @ObservedObject var settings: AppSettings
     @State private var edited = false
+    /// The field is edited as text and committed on Return, rather than bound straight
+    /// to the setting: the page rezooms live, so a half-typed "1" would throw it to the
+    /// minimum and back on the way to "110".
+    @State private var zoomText = ""
 
     private var isCustom: Bool { settings.styleTheme == SiteStyle.customThemeID }
+
+    private var zoomPercent: String {
+        String(Int((settings.effectiveSiteZoom * 100).rounded()))
+    }
+
+    private func nudgeZoom(_ delta: Double) {
+        settings.siteZoom = min(AppSettings.siteZoomRange.upperBound,
+                                max(AppSettings.siteZoomRange.lowerBound,
+                                    settings.effectiveSiteZoom + delta))
+    }
+
+    private func commitZoom() {
+        guard let typed = Double(zoomText.trimmingCharacters(in: .whitespaces)), typed > 0
+        else { zoomText = zoomPercent; return }
+        settings.siteZoom = min(AppSettings.siteZoomRange.upperBound,
+                                max(AppSettings.siteZoomRange.lowerBound, typed / 100))
+        zoomText = zoomPercent
+    }
 
     var body: some View {
         // ScrollView, matching the other tabs. The pane is a fixed height and the Done
@@ -1228,6 +1251,30 @@ private struct AppearanceTab: View {
         // of the sheet off the bottom of it.
         ScrollView {
         VStack(alignment: .leading, spacing: 12) {
+            SettingRow(label: "Site zoom",
+                       hint: "How large pages are drawn. This reflows the layout rather "
+                           + "than magnifying the finished picture, so nothing is cut "
+                           + "off at the right-hand edge. Pinch on any page to go "
+                           + "further still.") {
+                HStack(spacing: 8) {
+                    MonoField(placeholder: "110", text: $zoomText, width: 60)
+                    Text("%").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Stepper("",
+                            onIncrement: { nudgeZoom(0.05) },
+                            onDecrement: { nudgeZoom(-0.05) })
+                        .labelsHidden()
+                    Spacer()
+                    Button("Reset") { settings.siteZoom = AppSettings.defaultSiteZoom }
+                        .font(.system(size: 11))
+                        .disabled(abs(settings.siteZoom - AppSettings.defaultSiteZoom) < 0.005)
+                }
+                .onSubmit { commitZoom() }
+            }
+            .onAppear { zoomText = zoomPercent }
+            .onChange(of: settings.siteZoom) { _, _ in zoomText = zoomPercent }
+
+            Divider()
+
             Toggle("Restyle sites for consistency", isOn: $settings.unifiedStyleEnabled)
                 .font(.system(size: 12, weight: .medium))
             Text("One typeface, even spacing, consistent controls, and one colour scheme "
