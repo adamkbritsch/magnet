@@ -1,6 +1,44 @@
 import Foundation
 import WebKit
 
+/// Decides whether a navigation is a redirect ad.
+///
+/// A redirect ad is a script sending the whole window somewhere else, usually on the
+/// first click anywhere on the page. Nothing a filter list or a stylesheet can reach:
+/// by the time it happens the decision is about navigation, not content.
+///
+/// Pure and separate from the web view so the truth table can be tested directly,
+/// because the cost of getting it wrong is a browser that refuses to go places.
+enum RedirectGuard {
+    /// The discriminator is WHEN, not what.
+    ///
+    /// A server's own 302 arrives as a script-initiated navigation too, and blocking
+    /// those would break every mirror that redirects to its canonical domain. The
+    /// difference is that a server redirect happens while a navigation is still in
+    /// flight, whereas a redirect ad fires after the page has settled, off a click.
+    static func isRedirectAd(from current: URL?,
+                             to destination: URL,
+                             scriptInitiated: Bool,
+                             navigationInFlight: Bool,
+                             expected: URL?) -> Bool {
+        // A link the user clicked, a back/forward, a reload, a form: all deliberate.
+        guard scriptInitiated else { return false }
+        // Mid-navigation means this is a redirect being followed, not one being started.
+        guard !navigationInFlight else { return false }
+        // The app asked for this one itself -- opening a chip, switching to a mirror.
+        if let expected, expected == destination { return false }
+
+        guard let scheme = destination.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let destHost = destination.host else { return false }
+        // With nowhere to compare against there is nothing to judge.
+        guard let current, let currentHost = current.host else { return false }
+
+        // Staying on the site is the site's own business: pagination, search, login.
+        return registrableDomain(destHost) != registrableDomain(currentHost)
+    }
+}
+
 /// Hides self-hosted banner ads, which filter lists structurally cannot catch.
 ///
 /// EasyList and friends block ad NETWORKS by hostname. A tracker's own affiliate
@@ -44,7 +82,30 @@ enum BannerBlocker {
             } catch (e) { return false; }
           }
 
+          // A full-window transparent link. The whole page becomes one advert: any
+          // click is a real link activation, so it looks entirely legitimate to a
+          // navigation policy and only its SHAPE gives it away -- covering the view,
+          // holding nothing, and leaving the site.
+          function sweepCatchers() {
+            var vw = window.innerWidth || 1280, vh = window.innerHeight || 800;
+            var links = document.querySelectorAll('a');
+            for (var i = 0; i < links.length; i++) {
+              var a = links[i];
+              if (a.getAttribute('data-x-catcher')) continue;
+              var r = a.getBoundingClientRect();
+              if (r.width < vw * 0.55 || r.height < vh * 0.55) continue;
+              // Real content that big has text or pictures in it.
+              if ((a.textContent || '').trim().length > 0) continue;
+              if (a.querySelector('img, video, svg, picture')) continue;
+              var cs = getComputedStyle(a);
+              if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
+              a.setAttribute('data-x-catcher', '1');
+              a.style.setProperty('display', 'none', 'important');
+            }
+          }
+
           function sweep() {
+            sweepCatchers();
             var imgs = document.images;
             for (var i = 0; i < imgs.length; i++) {
               var im = imgs[i];

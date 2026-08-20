@@ -125,14 +125,33 @@ final class DownloadManager: NSObject, ObservableObject {
     /// to partner or CDN hosts on unrelated domains, so matching the response host
     /// would miss most real downloads.
     func shouldCapture(_ response: WKNavigationResponse, pageURL: URL?) -> Bool {
-        guard let pageURL, isKnownSource(pageURL) else { return false }
-        if !response.canShowMIMEType { return true }
-        if let http = response.response as? HTTPURLResponse,
-           let disposition = http.value(forHTTPHeaderField: "Content-Disposition"),
-           disposition.lowercased().contains("attachment") {
-            return true
-        }
-        return Self.kind(of: response.response.url?.lastPathComponent ?? "") != .unknown
+        let disposition = (response.response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
+        return Self.shouldCapture(
+            canShowMIMEType: response.canShowMIMEType,
+            isAttachment: disposition.contains("attachment"),
+            filename: response.response.url?.lastPathComponent ?? "",
+            fromKnownSource: pageURL.map(isKnownSource) ?? false)
+    }
+
+    /// The decision, separated from WebKit so the truth table can be tested.
+    ///
+    /// The ordering matters, and used to be wrong. Whether the page is a site we know
+    /// governs WHERE a file is filed; it must never govern whether we take it at all.
+    /// A response WebKit cannot display, allowed through, gets rendered as text -- the
+    /// window fills with raw bytes and reads as a broken page.
+    nonisolated static func shouldCapture(canShowMIMEType: Bool,
+                                          isAttachment: Bool,
+                                          filename: String,
+                                          fromKnownSource: Bool) -> Bool {
+        // Unrenderable, from anywhere. Taking it always beats showing the bytes.
+        if !canShowMIMEType { return true }
+        // The server said so outright.
+        if isAttachment { return true }
+        // Below here is a guess about something WebKit COULD display, so it is scoped
+        // to sites we actually know.
+        guard fromKnownSource else { return false }
+        return kind(of: filename) != .unknown
     }
 
     /// A link opened from a known source that could plausibly be a file.

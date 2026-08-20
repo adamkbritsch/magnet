@@ -63,6 +63,29 @@ check("routes are exactly the four expected", routes == ["Books", "TV", "Games",
 check("archive root is not a watched folder", !forbidden.contains(DownloadManager.archiveRoot),
       "root=\(DownloadManager.archiveRoot)")
 
+print("Test 4b - a response WebKit cannot display is NEVER rendered as text")
+// This was the bug: the known-source check came first, so an unrenderable response
+// from an unrecognised page was allowed through and WebKit drew the raw bytes.
+check("unrenderable from an unknown page is still captured",
+      DownloadManager.shouldCapture(canShowMIMEType: false, isAttachment: false,
+                                    filename: "thing.bin", fromKnownSource: false))
+check("unrenderable from a known page is captured",
+      DownloadManager.shouldCapture(canShowMIMEType: false, isAttachment: false,
+                                    filename: "thing.bin", fromKnownSource: true))
+check("an explicit attachment is captured wherever it came from",
+      DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: true,
+                                    filename: "x", fromKnownSource: false))
+check("an ordinary page is left alone",
+      !DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: false,
+                                     filename: "index.html", fromKnownSource: true))
+// Guessing by extension is only reasonable on a site we know.
+check("a guessable file on a known site is captured",
+      DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: false,
+                                    filename: "book.epub", fromKnownSource: true))
+check("the same file on an unknown site is not",
+      !DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: false,
+                                     filename: "book.epub", fromKnownSource: false))
+
 print("Test 5 - a colliding destination gets a fresh name")
 let dir = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("x1337-dl-\(UUID().uuidString)")

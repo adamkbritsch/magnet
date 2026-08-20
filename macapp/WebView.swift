@@ -67,6 +67,12 @@ final class WebController: NSObject, ObservableObject {
     var onLoadFailure: ((String) -> Void)?
 
     private(set) var webView: WKWebView!
+    /// The last URL the app itself asked for, so its own navigations are never
+    /// mistaken for a page redirecting itself somewhere.
+    private var expectedNavigation: URL?
+    /// True between starting a navigation and finishing it. A server's 302 arrives
+    /// while this holds; a redirect ad fires long after it clears.
+    private var navigationInFlight = false
     private var observations: [NSKeyValueObservation] = []
     private var toastClear: DispatchWorkItem?
     private var challengeTimeout: DispatchWorkItem?
@@ -132,7 +138,10 @@ final class WebController: NSObject, ObservableObject {
     /// Whatever is on screen, so a rebuild can put the user back where they were.
     var currentURL: URL? { webView.url }
 
-    func load(_ url: URL) { webView.load(URLRequest(url: url)) }
+    func load(_ url: URL) {
+        expectedNavigation = url
+        webView.load(URLRequest(url: url))
+    }
     func reload() { webView.reload() }
     func goBack() { webView.goBack() }
     func stop() { webView.stopLoading() }
@@ -178,6 +187,19 @@ extension WebController: WKNavigationDelegate {
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.allow); return }
 
+        // A page sending the window somewhere else entirely, which is what a redirect
+        // ad does on the first click anywhere.
+        if navigationAction.targetFrame?.isMainFrame ?? true,
+           RedirectGuard.isRedirectAd(from: webView.url,
+                                      to: url,
+                                      scriptInitiated: navigationAction.navigationType == .other,
+                                      navigationInFlight: navigationInFlight,
+                                      expected: expectedNavigation) {
+            showToast("Blocked a redirect to \(url.host ?? "another site")", isError: false)
+            decisionHandler(.cancel)
+            return
+        }
+
         // The whole point of the old Torrent Control extension, done natively.
         if url.scheme?.lowercased() == "magnet" {
             handleMagnet(url)
@@ -217,7 +239,12 @@ extension WebController: WKNavigationDelegate {
         DownloadManager.shared.attach(download, page: webView.url)
     }
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        navigationInFlight = true
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        navigationInFlight = false
         // The challenge page reloads itself when solved, so this fires again with
         // the real page and clears the flag.
         webView.evaluateJavaScript("document.title") { [weak self] value, _ in
@@ -239,11 +266,13 @@ extension WebController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        navigationInFlight = false
         isChallenged = false
         report(error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        navigationInFlight = false
         isChallenged = false
         report(error)
     }
