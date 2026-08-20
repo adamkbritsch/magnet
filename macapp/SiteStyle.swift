@@ -320,6 +320,34 @@ enum SiteStyle {
     }
     a .x-wordmark, a:hover .x-wordmark { color: var(--x-link) !important; }
 
+    /* The site's own logo must never paint, not even for one frame.
+       An image that appears and is then replaced reads as a fault, so the candidates
+       are hidden from the first byte and released again the moment the hunt decides
+       one is not a logo. Hiding an image that has not loaded yet costs nothing -- it
+       has no pixels to show -- so this is invisible in every case except the one it
+       exists for. `visibility` rather than `display`, because the box must still be
+       laid out: its measured size is what the wordmark is cut to. */
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[class*="logo" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[id*="logo" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[alt*="logo" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[src*="logo" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[class*="brand" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[id*="brand" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[alt*="brand" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[src*="brand" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[class*="wordmark" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) img[src*="wordmark" i]:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) a[href="/"] img:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) a[href="./"] img:not([data-x-keep]) {
+      visibility: hidden !important;
+    }
+
+    /* The same, for a logo drawn as a background on an empty element. */
+    html[data-x-logo-hunt]:not(#\9):not(#\9) [class*="logo" i]:empty:not([data-x-keep]),
+    html[data-x-logo-hunt]:not(#\9):not(#\9) [id*="logo" i]:empty:not([data-x-keep]) {
+      background-image: none !important;
+    }
+
     /* Listings: a raised surface with real separation. */
     table:not(#\9):not(#\9):not(#\9):not(#\9) { background-color: var(--x-surface) !important; }
     th:not(#\9):not(#\9):not(#\9):not(#\9) {
@@ -509,53 +537,102 @@ enum SiteStyle {
           // artwork. Replacing it with the site's name, set at the same height, is what
           // makes different sites actually look like one app. The surrounding <a> is
           // left in place, so clicking the logo still goes home.
+          // Let go of something the hunt has judged and does not want. The surface
+          // pass is reset with it: it marks what it has seen, and it skips anything
+          // invisible, so an element released after being seen would keep the site's
+          // own borders and corners for good.
+          function release(el) {
+            try {
+              el.setAttribute('data-x-keep', '1');
+              el.removeAttribute('data-x-surf');
+            } catch (e) {}
+          }
+
+          // Measuring before the site's own stylesheets have arrived would cut the
+          // wordmark to the image's NATURAL size rather than its laid-out one, which
+          // on a logo served at 2x is twice the width it should be.
+          function cssPending() {
+            // Only while the document is still being parsed. A stylesheet that 404s --
+            // or that the content blocker refused -- never gets a `sheet`, so waiting
+            // on one unconditionally would mean the logo is never replaced at all.
+            // That is a far worse failure than measuring a little early, and on these
+            // sites blocked requests are the normal case, not the edge one.
+            if (document.readyState !== 'loading') return false;
+            try {
+              var links = document.querySelectorAll('link[rel~="stylesheet" i]');
+              for (var i = 0; i < links.length; i++) {
+                if (!links[i].sheet && !links[i].disabled) return true;
+              }
+            } catch (e) {}
+            return false;
+          }
+
+          var logoSwaps = 0;
+
+          // 'swapped', 'no' (settled: not a logo, let it show) or 'wait' (cannot tell
+          // yet, so leave it hidden and look again when more of the page exists).
+          function considerImage(img) {
+            if (!img || img.getAttribute('data-x-logo') ||
+                img.getAttribute('data-x-keep')) return 'no';
+
+            var isLogo = looksLikeLogo(img);
+            if (!isLogo && img.closest) {
+              // Otherwise: an image near the top that is a link to the site root.
+              var a = img.closest('a');
+              if (a) {
+                var href = a.getAttribute('href') || '';
+                var atTop = img.getBoundingClientRect().top + (window.scrollY || 0) < 260;
+                if (atTop && (href === '/' || href === './' ||
+                              href === location.origin + '/')) isLogo = true;
+              }
+            }
+            if (!isLogo) { release(img); return 'no'; }
+            if (logoSwaps >= 3) { release(img); return 'no'; }
+            if (cssPending()) return 'wait';
+
+            var box = img.getBoundingClientRect();
+            // Nothing has been laid out yet -- that is not a verdict, it is a wait.
+            if (!box.width && !box.height && !img.width && !img.height) return 'wait';
+
+            var h = Math.round(box.height) || img.height || 0;
+            var w = Math.round(box.width) || img.width || 0;
+            if (h < 18 || w < 40) { release(img); return 'no'; }        // laid out, and small
+            if (box.top + (window.scrollY || 0) > 400) { release(img); return 'no'; }
+
+            img.setAttribute('data-x-logo', '1');
+            img.style.display = 'none';
+            if (img.parentNode) {
+              var mark = wordmark(w, h);
+              img.parentNode.insertBefore(mark, img);
+              containIn(mark.parentElement, w, h);
+              // Must be in the document before it can be measured.
+              fitToWidth(mark, w, h);
+            }
+            logoSwaps++;
+            return 'swapped';
+          }
+
           function swapLogos() {
-            var imgs = document.images, swapped = 0;
-            for (var i = 0; i < imgs.length && swapped < 3; i++) {
-              var img = imgs[i];
-              if (!img || img.getAttribute('data-x-logo')) continue;
-
-              var isLogo = looksLikeLogo(img);
-              if (!isLogo && img.closest) {
-                // Otherwise: an image near the top that is a link to the site root.
-                var a = img.closest('a');
-                if (a) {
-                  var href = a.getAttribute('href') || '';
-                  var atTop = img.getBoundingClientRect().top + (window.scrollY || 0) < 260;
-                  if (atTop && (href === '/' || href === './' ||
-                                href === location.origin + '/')) isLogo = true;
-                }
-              }
-              if (!isLogo) continue;
-
-              var h = Math.round(img.getBoundingClientRect().height) || img.height || 0;
-              var wNow = Math.round(img.getBoundingClientRect().width) || img.width || 0;
-              if (h < 18 || wNow < 40) continue;  // not laid out yet, or too small
-              if (img.getBoundingClientRect().top + (window.scrollY || 0) > 400) continue;
-              var w = Math.round(img.getBoundingClientRect().width) || img.width || 0;
-              img.setAttribute('data-x-logo', '1');
-              img.style.display = 'none';
-              if (img.parentNode) {
-                var mark = wordmark(w, h);
-                img.parentNode.insertBefore(mark, img);
-                containIn(mark.parentElement, w, h);
-                // Must be in the document before it can be measured.
-                fitToWidth(mark, w, h);
-              }
-              swapped++;
+            var imgs = document.images;
+            for (var i = 0; i < imgs.length && logoSwaps < 3; i++) {
+              try { considerImage(imgs[i]); } catch (e) {}
             }
 
             // Logos drawn as a CSS background on an empty element.
             var els = document.querySelectorAll('[class*="logo" i], [id*="logo" i]');
             for (var j = 0; j < els.length; j++) {
               var el = els[j];
-              if (el.getAttribute('data-x-logo')) continue;
-              if (el.querySelector('img')) continue;
-              if ((el.textContent || '').trim().length) continue;
-              if (getComputedStyle(el).backgroundImage === 'none') continue;
+              // An <img class="logo"> matches this query too, and it belongs to the
+              // pass above -- which may still be waiting for it to load. Releasing it
+              // here would put the site's own logo back on screen.
+              if (el.tagName === 'IMG') continue;
+              if (el.getAttribute('data-x-logo') || el.getAttribute('data-x-keep')) continue;
+              if (el.querySelector('img')) { release(el); continue; }
+              if ((el.textContent || '').trim().length) { release(el); continue; }
+              if (getComputedStyle(el).backgroundImage === 'none') { release(el); continue; }
               var box = el.getBoundingClientRect();
               var eh = Math.round(box.height), ew = Math.round(box.width);
-              if (eh < 14) continue;
+              if (eh < 14) { release(el); continue; }
               el.setAttribute('data-x-logo', '1');
               el.style.backgroundImage = 'none';
               var m = wordmark(ew, eh);
@@ -750,11 +827,65 @@ enum SiteStyle {
             }).observe(root, { childList: true, subtree: true });
           }
 
+          // The static pre-hide rules cover the words a logo file is usually named
+          // with. This adds the one thing a stylesheet cannot know on its own: what
+          // this site is called. Tokens come from norm(), which keeps only letters and
+          // digits, so nothing here can break out of the selector.
+          function huntStyle() {
+            if (document.getElementById('x-logo-hunt')) return;
+            var host = location.hostname;
+            if (host.indexOf('www.') === 0) host = host.slice(4);
+            var parts = host.split('.')[0].split('-');
+            var tokens = [norm(parts.join(''))];
+            for (var i = 0; i < parts.length; i++) {
+              var t = norm(parts[i]);
+              if (t.length >= 4 && tokens.indexOf(t) < 0) tokens.push(t);
+            }
+            var sel = [];
+            for (var j = 0; j < tokens.length; j++) {
+              if (tokens[j].length < 3) continue;
+              sel.push('html[data-x-logo-hunt] img[src*="' + tokens[j] + '" i]:not([data-x-keep])');
+              sel.push('html[data-x-logo-hunt] img[alt*="' + tokens[j] + '" i]:not([data-x-keep])');
+            }
+            if (!sel.length) return;
+            var el = document.createElement('style');
+            el.id = 'x-logo-hunt';
+            el.textContent = sel.join(',') + '{visibility:hidden!important}';
+            (document.head || root).appendChild(el);
+          }
+
+          // Each image is judged the moment IT loads: the first instant its real size
+          // is known, and the last instant before it would have had pixels to show.
+          function onResource(e) {
+            var t = e && e.target;
+            if (!t || t.tagName !== 'IMG') return;
+            try { considerImage(t); } catch (err) {}
+          }
+
+          // Backstop. Nothing may stay hidden because a verdict never arrived -- a
+          // stylesheet that 404s leaves cssPending() true for good, and an image with
+          // no src fires neither load nor error.
+          function releaseUndecided() {
+            try {
+              var imgs = document.images;
+              for (var i = 0; i < imgs.length; i++) {
+                if (!imgs[i].getAttribute('data-x-logo')) release(imgs[i]);
+              }
+              var els = document.querySelectorAll('[class*="logo" i], [id*="logo" i]');
+              for (var j = 0; j < els.length; j++) {
+                if (!els[j].getAttribute('data-x-logo')) release(els[j]);
+              }
+            } catch (e) {}
+          }
+
           function apply() {
             // Plain CSS has no way to ask what site it is on, so the hostname is put
             // where a selector can reach it. This is what makes a per-site exception
             // possible from the editable stylesheet.
             try { root.setAttribute('data-x-host', location.hostname); } catch (e) {}
+            // Set in the same breath, and before anything has been parsed: this is what
+            // keeps the site's own logo from ever reaching the screen.
+            try { root.setAttribute('data-x-logo-hunt', '1'); } catch (e) {}
             if (!document.getElementById('x-unified-style')) {
               var el = document.createElement('style');
               el.id = 'x-unified-style';
@@ -852,14 +983,21 @@ enum SiteStyle {
               }
             } catch (e) {}
 
+            try { huntStyle(); } catch (e) {}
             try { normaliseSurfaces(); } catch (e) {}
             try { swapLogos(); } catch (e) {}
           }
 
           apply();
+          // Capture phase, because load and error do not bubble.
+          document.addEventListener('load', onResource, true);
+          document.addEventListener('error', onResource, true);
           document.addEventListener('DOMContentLoaded', function () { apply(); watchForOverlays(); });
           // Some sites replace <head> late in boot.
-          window.addEventListener('load', apply);
+          window.addEventListener('load', function () {
+            apply();
+            setTimeout(releaseUndecided, 1200);
+          });
         })();
         """
         // Every frame, not just the main one.
