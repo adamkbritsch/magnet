@@ -345,5 +345,114 @@ check("a light theme differs from the dark one",
       paper["bodyBG"] != l["bodyBG"] && paper["linkFG"] != l["linkFG"],
       "\(paper["bodyBG"] ?? "") / \(paper["linkFG"] ?? "")")
 
+
+// MARK: - The site's own logo must never reach the screen
+//
+// The moment an image finishes loading is the first instant it could paint, and the
+// probe below is registered BEFORE the styling script, so its handler runs first and
+// sees the page as it stood at that instant rather than after the swap. Hidden there
+// means it was never seen.
+//
+// The logo with no width/height is the one that matters: its box is 0x0 until the
+// bytes arrive, so it cannot be measured -- and measuring is what the replacement
+// needs. That is why this used to be swapped only on window.load, one paint too late.
+let flashPage = """
+<html><head>
+ <link rel="stylesheet" href="https://example.com/never-arrives.css">
+ <style> body { background:#fff; color:#111 } </style>
+</head><body>
+ <a id="homelink" href="/"><img id="logo" class="site-logo" style="width:120px;height:48px"
+    src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="></a>
+ <a id="latelink" href="/"><img id="lateLogo" class="site-logo"
+    src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAKAAAAAoCAIAAAD2TmbPAAAAWElEQVR42u3RAQ0AAAjDsAu7/yALHZAmU7BmWj0uFgAWYAEWYAEWYAEGLMACLMACLMACDFiABViABViABViAAQuwAAuwAAuwAAMWYAEWYAEWYAEGLMC62QLKtUHSnYCjlgAAAABJRU5ErkJggg=="></a>
+ <img id="content" style="width:300px;height:200px"
+    src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+ <img id="tinylogo" class="logo-icon" style="width:16px;height:16px"
+    src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+ <p>body</p>
+</body></html>
+"""
+
+let flashProbe = """
+(function(){
+  window.__f = {};
+  function vis(el){
+    if (!el) return 'gone';
+    var cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return 'hidden';
+    var r = el.getBoundingClientRect();
+    if (!r.width || !r.height) return 'hidden';
+    if (el.tagName === 'IMG' && (!el.complete || !el.naturalWidth)) return 'blank';
+    return 'VISIBLE';
+  }
+  window.__vis = vis;
+  document.addEventListener('load', function(e){
+    var t = e.target;
+    if (t && t.tagName === 'IMG' && t.id) window.__f['atLoad_' + t.id] = vis(t);
+  }, true);
+})();
+"""
+
+final class FlashRunner: NSObject, WKNavigationDelegate {
+    var result: [String: String] = [:]
+    var done = false
+    func webView(_ w: WKWebView, didFinish n: WKNavigation!) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+            let js = """
+            (function(){
+              var f = window.__f;
+              return JSON.stringify({
+                atLoad_logo: f.atLoad_logo || 'never-fired',
+                atLoad_lateLogo: f.atLoad_lateLogo || 'never-fired',
+                atLoad_content: f.atLoad_content || 'never-fired',
+                end_logo: window.__vis(document.getElementById('logo')),
+                end_lateLogo: window.__vis(document.getElementById('lateLogo')),
+                end_content: window.__vis(document.getElementById('content')),
+                end_tinylogo: window.__vis(document.getElementById('tinylogo')),
+                marks: String(document.querySelectorAll('.x-wordmark').length)
+              });
+            })();
+            """
+            w.evaluateJavaScript(js) { v, _ in
+                if let s = v as? String, let d = s.data(using: .utf8),
+                   let o = try? JSONSerialization.jsonObject(with: d) as? [String: String] { self.result = o }
+                self.done = true
+            }
+        }
+    }
+}
+
+let fcfg = WKWebViewConfiguration()
+fcfg.userContentController.addUserScript(
+    WKUserScript(source: flashProbe, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+if let st = SiteStyle.userScript(css: SiteStyle.defaultCSS) { fcfg.userContentController.addUserScript(st) }
+let fw = WKWebView(frame: .init(x: 0, y: 0, width: 900, height: 600), configuration: fcfg)
+let fr = FlashRunner(); fw.navigationDelegate = fr
+fw.loadHTMLString(flashPage, baseURL: URL(string: "https://eztv.re/"))
+let fdeadline = Date().addingTimeInterval(25)
+while !fr.done && Date() < fdeadline {
+    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+}
+let f = fr.result
+
+print("\nThe site's own logo is never seen")
+check("hidden at the first instant it could paint",
+      f["atLoad_logo"] == "hidden", f["atLoad_logo"] ?? "")
+check("including one with no declared size",
+      f["atLoad_lateLogo"] == "hidden", f["atLoad_lateLogo"] ?? "")
+check("and it stays gone", f["end_logo"] == "hidden" && f["end_lateLogo"] == "hidden",
+      "\(f["end_logo"] ?? "?") / \(f["end_lateLogo"] ?? "?")")
+// A stylesheet that never arrives is the normal case here, not the edge one: the
+// content blocker refuses plenty of them. Waiting on one must not mean waiting forever.
+check("both are replaced even though a stylesheet never loaded",
+      f["marks"] == "2", f["marks"] ?? "")
+
+print("\nNothing else is hidden by the hunt")
+check("an ordinary image is never touched",
+      f["atLoad_content"] == "VISIBLE" && f["end_content"] == "VISIBLE",
+      "\(f["atLoad_content"] ?? "?") / \(f["end_content"] ?? "?")")
+check("a logo-named image that is too small to be one is released",
+      f["end_tinylogo"] == "VISIBLE", f["end_tinylogo"] ?? "")
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)
