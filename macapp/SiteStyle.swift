@@ -300,6 +300,9 @@ enum SiteStyle {
 
     /* The wordmark the script swaps in for a logo image. */
     .x-wordmark {
+      /* The letters never take the click themselves; it belongs to the box around
+         them, which is the link. */
+      pointer-events: none !important;
       display: inline-flex !important;
       align-items: center !important;
       justify-content: flex-start !important;
@@ -465,13 +468,21 @@ enum SiteStyle {
           // child overhangs the line box, so it can sit on top of whatever is above or
           // below. Shrink-wrapping the parent makes the replacement occupy exactly the
           // space the image did.
-          function containIn(parent) {
+          function containIn(parent, w, h) {
             if (!parent || parent.getAttribute('data-x-contain')) return;
+            parent.setAttribute('data-x-contain', '1');
             var d = getComputedStyle(parent).display;
-            if (d === 'inline') {
-              parent.style.display = 'inline-flex';
-              parent.style.alignItems = 'center';
-              parent.setAttribute('data-x-contain', '1');
+            // An inline parent does not contain a fixed-height inline-flex child: the
+            // child overhangs the line box and can sit on top of its neighbours.
+            if (d === 'inline' || d === 'inline-block') {
+              parent.style.setProperty('display', 'inline-flex', 'important');
+              parent.style.setProperty('align-items', 'center', 'important');
+            }
+            // The link takes the whole area the image occupied, so the target is the
+            // BOX rather than the letters. Text is a poor thing to have to hit.
+            if (w > 0 && h > 0) {
+              parent.style.setProperty('min-width', w + 'px', 'important');
+              parent.style.setProperty('min-height', h + 'px', 'important');
             }
           }
 
@@ -527,7 +538,7 @@ enum SiteStyle {
               if (img.parentNode) {
                 var mark = wordmark(w, h);
                 img.parentNode.insertBefore(mark, img);
-                containIn(mark.parentElement);
+                containIn(mark.parentElement, w, h);
                 // Must be in the document before it can be measured.
                 fitToWidth(mark, w, h);
               }
@@ -549,7 +560,7 @@ enum SiteStyle {
               el.style.backgroundImage = 'none';
               var m = wordmark(ew, eh);
               el.appendChild(m);
-              containIn(el);
+              containIn(el, ew, eh);
               fitToWidth(m, ew, eh);
             }
           }
