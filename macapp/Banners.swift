@@ -3,39 +3,57 @@ import WebKit
 
 /// Decides whether a navigation is a redirect ad.
 ///
-/// A redirect ad is a script sending the whole window somewhere else, usually on the
-/// first click anywhere on the page. Nothing a filter list or a stylesheet can reach:
-/// by the time it happens the decision is about navigation, not content.
+/// These hijack NAVIGATION rather than inject content, so no filter list or stylesheet
+/// reaches them. Judged per CHAIN rather than per hop, because the technique that
+/// defeats a per-hop rule is the one these sites actually use: an on-site redirector.
+/// You click `site.example/out?url=...`, which is the same domain and therefore a
+/// perfectly ordinary link, and the SERVER then 302s you somewhere else entirely. Every
+/// individual hop looks defensible; only the chain gives it away.
 ///
-/// Pure and separate from the web view so the truth table can be tested directly,
-/// because the cost of getting it wrong is a browser that refuses to go places.
+/// Pure, and separate from the web view, so the truth table can be tested directly --
+/// the cost of an over-eager rule here is a browser that refuses to go places.
 enum RedirectGuard {
-    /// The discriminator is WHEN, not what.
-    ///
-    /// A server's own 302 arrives as a script-initiated navigation too, and blocking
-    /// those would break every mirror that redirects to its canonical domain. The
-    /// difference is that a server redirect happens while a navigation is still in
-    /// flight, whereas a redirect ad fires after the page has settled, off a click.
+    /// Where a navigation chain came from, carried across its redirects.
+    struct Chain {
+        /// True when the app asked for this navigation: opening a chip, switching to a
+        /// mirror. Those chains are trusted through every redirect, which is what keeps
+        /// a site that 302s to its canonical domain working.
+        var appInitiated: Bool
+        /// The registrable domain the chain was aimed at -- the href the user clicked,
+        /// or the URL the app requested. A chain is allowed to move within this.
+        var anchorDomain: String?
+    }
+
     static func isRedirectAd(from current: URL?,
                              to destination: URL,
                              scriptInitiated: Bool,
                              navigationInFlight: Bool,
-                             expected: URL?) -> Bool {
-        // A link the user clicked, a back/forward, a reload, a form: all deliberate.
-        guard scriptInitiated else { return false }
-        // Mid-navigation means this is a redirect being followed, not one being started.
-        guard !navigationInFlight else { return false }
-        // The app asked for this one itself -- opening a chip, switching to a mirror.
-        if let expected, expected == destination { return false }
-
+                             chain: Chain) -> Bool {
         guard let scheme = destination.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               let destHost = destination.host else { return false }
-        // With nowhere to compare against there is nothing to judge.
-        guard let current, let currentHost = current.host else { return false }
+        let dest = registrableDomain(destHost)
 
-        // Staying on the site is the site's own business: pagination, search, login.
-        return registrableDomain(destHost) != registrableDomain(currentHost)
+        // The app asked for it, and so did every redirect it triggers.
+        if chain.appInitiated { return false }
+
+        // A link the user actually clicked is honoured -- but only to where it SAID it
+        // went. This is the hop that matters: the click is allowed, and the 302 that
+        // follows it out of that domain is not.
+        if !scriptInitiated {
+            return false
+        }
+
+        // Same site: pagination, search, login, the site's own interstitials.
+        if let current, let currentHost = current.host,
+           registrableDomain(currentHost) == dest { return false }
+
+        // Still inside whatever the user aimed at, including its own redirects.
+        if let anchor = chain.anchorDomain, anchor == dest { return false }
+
+        // A script or a redirect taking the window somewhere nobody asked for.
+        _ = navigationInFlight
+        return true
     }
 }
 

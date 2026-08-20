@@ -67,11 +67,10 @@ final class WebController: NSObject, ObservableObject {
     var onLoadFailure: ((String) -> Void)?
 
     private(set) var webView: WKWebView!
-    /// The last URL the app itself asked for, so its own navigations are never
-    /// mistaken for a page redirecting itself somewhere.
-    private var expectedNavigation: URL?
-    /// True between starting a navigation and finishing it. A server's 302 arrives
-    /// while this holds; a redirect ad fires long after it clears.
+    /// What the current navigation chain came from, carried across its redirects.
+    /// An on-site redirector defeats any per-hop rule, so the chain is what is judged.
+    private var chain = RedirectGuard.Chain(appInitiated: true, anchorDomain: nil)
+    /// True between starting a navigation and finishing it.
     private var navigationInFlight = false
     private var observations: [NSKeyValueObservation] = []
     private var toastClear: DispatchWorkItem?
@@ -139,7 +138,10 @@ final class WebController: NSObject, ObservableObject {
     var currentURL: URL? { webView.url }
 
     func load(_ url: URL) {
-        expectedNavigation = url
+        // The app asked for this, so trust it and every redirect it triggers -- that is
+        // what lets a mirror 302 to its canonical domain.
+        chain = RedirectGuard.Chain(appInitiated: true,
+                                    anchorDomain: url.host.map(registrableDomain))
         webView.load(URLRequest(url: url))
     }
     func reload() { webView.reload() }
@@ -189,15 +191,27 @@ extension WebController: WKNavigationDelegate {
 
         // A page sending the window somewhere else entirely, which is what a redirect
         // ad does on the first click anywhere.
-        if navigationAction.targetFrame?.isMainFrame ?? true,
-           RedirectGuard.isRedirectAd(from: webView.url,
-                                      to: url,
-                                      scriptInitiated: navigationAction.navigationType == .other,
-                                      navigationInFlight: navigationInFlight,
-                                      expected: expectedNavigation) {
-            showToast("Blocked a redirect to \(url.host ?? "another site")", isError: false)
-            decisionHandler(.cancel)
-            return
+        let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+        if isMainFrame {
+            // A click starts a NEW chain, aimed at wherever the link said it went. The
+            // redirects that follow are then judged against that, which is what catches
+            // an on-site redirector bouncing the window off to an advertiser.
+            if navigationAction.navigationType == .linkActivated {
+                chain = RedirectGuard.Chain(appInitiated: false,
+                                            anchorDomain: url.host.map(registrableDomain))
+            }
+            if RedirectGuard.isRedirectAd(from: webView.url,
+                                          to: url,
+                                          // Only `.other` is script-initiated. Back, forward, reload and form
+                                          // submissions are the user, and a back button that refuses
+                                          // to leave the current domain is worse than any advert.
+                                          scriptInitiated: navigationAction.navigationType == .other,
+                                          navigationInFlight: navigationInFlight,
+                                          chain: chain) {
+                showToast("Blocked a redirect to \(url.host ?? "another site")", isError: false)
+                decisionHandler(.cancel)
+                return
+            }
         }
 
         // The whole point of the old Torrent Control extension, done natively.
