@@ -148,7 +148,7 @@ final class AppSettings: ObservableObject {
     /// How large sites are drawn. Trackers are dense pages laid out for monitors that
     /// are no longer the ones anyone owns, so the default is a little over life size.
     @Published var siteZoom: Double { didSet { put("site.zoom", siteZoom) } }
-    static let defaultSiteZoom: Double = 1.10
+    static let defaultSiteZoom: Double = 1.05
     static let siteZoomRange: ClosedRange<Double> = 0.5...3.0
 
     /// Clamped on the way out. A stored zero -- from a cleared field, or a hand-edited

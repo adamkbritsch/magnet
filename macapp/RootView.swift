@@ -1222,7 +1222,7 @@ private struct AppearanceTab: View {
     @State private var edited = false
     /// The field is edited as text and committed on Return, rather than bound straight
     /// to the setting: the page rezooms live, so a half-typed "1" would throw it to the
-    /// minimum and back on the way to "110".
+    /// minimum and back on the way to "105".
     @State private var zoomText = ""
 
     private var isCustom: Bool { settings.styleTheme == SiteStyle.customThemeID }
@@ -1257,7 +1257,7 @@ private struct AppearanceTab: View {
                            + "off at the right-hand edge. Pinch on any page to go "
                            + "further still.") {
                 HStack(spacing: 8) {
-                    MonoField(placeholder: "110", text: $zoomText, width: 60)
+                    MonoField(placeholder: "105", text: $zoomText, width: 60)
                     Text("%").font(.system(size: 11)).foregroundStyle(.secondary)
                     Stepper("",
                             onIncrement: { nudgeZoom(0.05) },
