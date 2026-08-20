@@ -1,0 +1,69 @@
+#!/bin/bash
+# One-time seed of THIS machine's configuration.
+#
+# The app ships with empty defaults so it is useful to anyone; this fills in the
+# values that used to be compiled into the source. Everything else -- sites, hidden
+# and pinned chips, category overrides, collapsed sections -- already lives in
+# UserDefaults and is untouched.
+#
+# Idempotent: existing values are left alone unless --force is given.
+set -uo pipefail
+
+DOMAIN="${MAGNET_BUNDLE_ID:-com.example.x1337}"
+FORCE=0
+[[ "${1:-}" == "--force" ]] && FORCE=1
+
+set_default() {                      # set_default <key> <type-and-value...>
+  local key="$1"; shift
+  if [[ $FORCE -eq 0 ]] && defaults read "$DOMAIN" "$key" >/dev/null 2>&1; then
+    printf '  keep   %s\n' "$key"; return
+  fi
+  defaults write "$DOMAIN" "$key" "$@"
+  printf '  set    %s\n' "$key"
+}
+
+echo "Seeding $DOMAIN"
+
+# Where the app opens, and what the route probe measures.
+set_default "home.url" -string "https://your-tracker.example/"
+
+# Firefox bookmark folder to mirror into the bar.
+set_default "bookmarks.folderName" -string "Torrent Sites"
+
+# Hosts that are infrastructure rather than a place to get things from, so they are
+# filtered out of the bar.
+set_default "bookmarks.infraHosts" -array "your-seedbox.example"
+
+# Forward (CONNECT) proxy for the Via NAS route.
+set_default "proxy.host" -string "192.168.1.10"
+set_default "proxy.port" -int 8893
+
+# qBittorrent Web API, via the NAS reverse proxy rather than the seedbox directly.
+set_default "qb.baseURL" -string "http://192.168.1.10:8890/"
+
+# Keychain services. Named explicitly because the qBittorrent credential is SHARED
+# with the separate qBittorrent app -- deriving it from this bundle id would break
+# that and prompt for a password again.
+set_default "proxy.keychainService" -string "com.example.x1337.proxy"
+set_default "qb.keychainService" -string "com.example.x1337.qbittorrent"
+
+# NAS archive for captured direct downloads.
+set_default "nas.host" -string "192.168.1.10"
+set_default "nas.share" -string "YourShare"
+set_default "nas.user" -string "your-smb-user"
+set_default "archive.root" -string "Direct"
+
+# Hand-checked mirror sets, which take precedence over anything discovered in bulk.
+# A set with a `page` reads its domain list live from that Wikipedia article.
+set_default "mirrors.curated" '(
+  { id = "1337x"; name = "1337x"; urls = (
+      "https://1337x.to/", "https://x1337x.cc/", "https://1337x.st/",
+      "https://x1337x.ws/", "https://x1337x.eu/", "https://x1337x.se/" ); },
+  { id = "annas-archive"; name = "Anna'"'"'s Archive"; page = "Anna'"'"'s Archive"; urls = (
+      "https://annas-archive.pk/", "https://annas-archive.gd/", "https://annas-archive.gl/" ); },
+  { id = "ext"; name = "ExT"; urls = (
+      "https://extto.com/", "https://ext.to/", "https://search.extto.com/" ); }
+)'
+
+echo
+echo "Done. Relaunch the app to pick these up."
