@@ -955,6 +955,26 @@ private struct ConnectionTab: View {
                     .labelsHidden().pickerStyle(.radioGroup)
                 }
 
+                SettingRow(label: "This network", hint: networkHint) {
+                    HStack(spacing: 8) {
+                        Text(routes.network?.label ?? "Not identified")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(routes.network == nil ? .tertiary : .secondary)
+                        Spacer()
+                        if routes.learned != nil {
+                            Button("Forget") {
+                                routes.forgetCurrentNetwork()
+                                NotificationCenter.default.post(name: .qbRecheck, object: nil)
+                            }
+                            .font(.system(size: 11))
+                        }
+                        if routes.knownNetworkCount > 1 {
+                            Button("Forget All") { routes.forgetAllNetworks() }
+                                .font(.system(size: 11))
+                        }
+                    }
+                }
+
                 Divider()
 
                 SettingRow(label: "Forward proxy",
@@ -993,6 +1013,22 @@ private struct ConnectionTab: View {
                 ProxyCredentialStore.save(user: user, pass: pass)
             }
         }
+    }
+
+    /// Says what was learned and what it is used for, or why nothing was learned.
+    private var networkHint: String {
+        guard routes.network != nil else {
+            return "The router could not be identified, so nothing is remembered here "
+                + "and both routes are tried in order every time."
+        }
+        let base = "Networks are remembered by their router rather than by Wi-Fi name, "
+            + "which macOS will not hand over without Location access."
+        guard let learned = routes.learned else {
+            return "Nothing learned here yet. " + base
+        }
+        return "\(learned.label) worked here last time, so it is tried first — which "
+            + "skips the wait for a route that is blocked on this network. It is not "
+            + "trusted blindly: the other one still follows if it fails. " + base
     }
 
     private var routeHint: String {

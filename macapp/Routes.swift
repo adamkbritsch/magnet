@@ -131,6 +131,10 @@ final class RouteStore: ObservableObject {
     @Published var proxyPort: UInt16
     /// nil = choose automatically; set = user pinned it.
     @Published private(set) var pinned: X1337Route?
+    /// The network this Mac is on, once a probe has looked.
+    @Published private(set) var network: NetworkIdentity.Network?
+    /// What worked here last time, if this network has been seen before.
+    @Published private(set) var learned: X1337Route?
 
     private let defaults = UserDefaults.standard
     private let session: URLSession
@@ -159,6 +163,64 @@ final class RouteStore: ObservableObject {
         pinned = route
         if let route { defaults.set(route.rawValue, forKey: "route.pinned") }
         else { defaults.removeObject(forKey: "route.pinned") }
+        // Choosing a route by hand says more about this network than any probe does.
+        if let route, let key = network?.key { remember(route, for: key) }
+    }
+
+    // MARK: - What worked on this network last time
+
+    /// Networks are remembered by their router, and the value is which route worked.
+    ///
+    /// The point is the wasted probe. On a network that blocks trackers the direct
+    /// check has to time out before the NAS is tried, and it does that on every launch,
+    /// having already learned the answer the launch before. Remembering turns five
+    /// seconds of staring at a blank window into none.
+    private static let memoryKey = "route.byNetwork"
+
+    private var memory: [String: String] {
+        get { (defaults.dictionary(forKey: Self.memoryKey) as? [String: String]) ?? [:] }
+        set { defaults.set(newValue, forKey: Self.memoryKey) }
+    }
+
+    func remembered(for key: String) -> X1337Route? {
+        memory[key].flatMap(X1337Route.init(rawValue:))
+    }
+
+    private func remember(_ route: X1337Route, for key: String) {
+        var m = memory
+        guard m[key] != route.rawValue else { return }
+        m[key] = route.rawValue
+        memory = m
+        learned = route
+    }
+
+    /// Forgets this network only, so the next probe starts from nothing.
+    func forgetCurrentNetwork() {
+        guard let key = network?.key else { return }
+        var m = memory
+        m.removeValue(forKey: key)
+        memory = m
+        learned = nil
+    }
+
+    func forgetAllNetworks() {
+        defaults.removeObject(forKey: Self.memoryKey)
+        learned = nil
+    }
+
+    var knownNetworkCount: Int { memory.count }
+
+    /// Which routes to try, in order.
+    ///
+    /// Pure, and separate from the probing, because the ordering is the whole feature
+    /// and the probing needs a network to test against. A remembered route is tried
+    /// first but never trusted: the other one still follows it, so a network that has
+    /// changed its mind costs one wasted probe and then corrects itself.
+    nonisolated static func probeOrder(pinned: X1337Route?,
+                                       remembered: X1337Route?) -> [X1337Route] {
+        if let pinned { return [pinned] }
+        guard let remembered else { return [.direct, .viaNAS] }
+        return [remembered] + X1337Route.allCases.filter { $0 != remembered }
     }
 
     /// The domain the app actually opens. Probing a fixed address would report the
@@ -227,13 +289,18 @@ final class RouteStore: ObservableObject {
 
     func resolve() async {
         status = .probing
-        let order: [X1337Route] = pinned.map { [$0] } ?? [.direct, .viaNAS]
+        // Off the main actor: this shells out, and the window is already on screen.
+        network = await Task.detached { NetworkIdentity.current() }.value
+        let key = network?.key
+        learned = key.flatMap { remembered(for: $0) }
+        let order = Self.probeOrder(pinned: pinned, remembered: learned)
 
         for route in order {
             let ok = route == .direct ? await directReachable() : await nasReachable()
             if ok {
                 active = route
                 status = .live(route)
+                if let key { remember(route, for: key) }
                 return
             }
         }
@@ -244,6 +311,7 @@ final class RouteStore: ObservableObject {
             if ok {
                 active = other
                 status = .live(other)
+                if let key { remember(other, for: key) }
                 return
             }
         }

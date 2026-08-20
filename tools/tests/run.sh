@@ -25,6 +25,7 @@ run sitestyle  "$(dirname "$0")/sitestyle/main.swift"  "$SRC/SiteStyle.swift"
 run render     "$(dirname "$0")/render/main.swift"     "$SRC/SiteStyle.swift"
 run banners    "$(dirname "$0")/banners/main.swift"    "$SRC/Domains.swift" "$SRC/Banners.swift"
 run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Downloads.swift"
+run network    "$(dirname "$0")/network/main.swift"    "$SRC/Domains.swift" "$SRC/Network.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Routes.swift"
 run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 if [ "${1:-}" = "--live" ]; then
   run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift"
