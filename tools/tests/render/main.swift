@@ -154,6 +154,11 @@ final class Runner: NSObject, WKNavigationDelegate {
               return String(Math.round(m.scrollWidth));
             })(),
             markInLink: String(!!(document.querySelector('.x-wordmark') && document.querySelector('.x-wordmark').closest('a'))),
+            markPointer: (function(){ var m=document.querySelector('.x-wordmark');
+              return m ? getComputedStyle(m).pointerEvents : 'n/a'; })(),
+            linkBox: (function(){ var a=document.getElementById('homelink');
+              if(!a) return '0x0'; var r=a.getBoundingClientRect();
+              return Math.round(r.width)+'x'+Math.round(r.height); })(),
             homelink: String(!!document.getElementById('homelink'))
           });
         })();
@@ -312,6 +317,11 @@ check("never taller than the image it replaced",
       (Double((l["markFontPx"] ?? "0").replacingOccurrences(of: "px", with: "")) ?? 99) <= 48 * 0.82 + 0.5,
       "font-size \(l["markFontPx"] ?? "?") vs cap \(48 * 0.82)")
 check("NO OVERLAP: stays within the link's box", l["markFits"] == "inside", l["markFits"] ?? "")
+// The target is the area the image occupied, not the letters. Text is a poor thing to
+// have to hit, and a short name would leave most of the logo's space dead.
+check("the LINK takes the image's whole box", l["linkBox"] == "120x48", l["linkBox"] ?? "")
+check("the letters do not intercept the click",
+      l["markPointer"] == "none", l["markPointer"] ?? "")
 check("still inside the link, so it still goes home",
       l["markInLink"] == "true", l["markInLink"] ?? "")
 check("the link itself survived", l["homelink"] == "true", l["homelink"] ?? "")
