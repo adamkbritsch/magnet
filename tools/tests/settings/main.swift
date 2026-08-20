@@ -56,9 +56,9 @@ MainActor.assumeIsolated {
     check("its domains persisted", ((reread.first?["urls"] as? [String]) ?? []).count == 2)
 
     print("Test 5 - sites are drawn a little over life size")
-    check("the default is 110%", AppSettings.defaultSiteZoom == 1.10,
+    check("the default is 105%", AppSettings.defaultSiteZoom == 1.05,
           "got \(AppSettings.defaultSiteZoom)")
-    check("an unconfigured launch starts there", Config.siteZoom == 1.10,
+    check("an unconfigured launch starts there", Config.siteZoom == 1.05,
           "got \(Config.siteZoom)")
     s.siteZoom = 1.25
     check("a chosen zoom persists", UserDefaults.standard.double(forKey: "site.zoom") == 1.25)
