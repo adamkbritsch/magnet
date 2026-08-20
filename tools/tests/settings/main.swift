@@ -55,7 +55,24 @@ MainActor.assumeIsolated {
     check("its article persisted", (reread.first?["page"] as? String) == "Some Article")
     check("its domains persisted", ((reread.first?["urls"] as? [String]) ?? []).count == 2)
 
-    print("Test 5 - clearing a field removes it rather than storing a blank")
+    print("Test 5 - sites are drawn a little over life size")
+    check("the default is 110%", AppSettings.defaultSiteZoom == 1.10,
+          "got \(AppSettings.defaultSiteZoom)")
+    check("an unconfigured launch starts there", Config.siteZoom == 1.10,
+          "got \(Config.siteZoom)")
+    s.siteZoom = 1.25
+    check("a chosen zoom persists", UserDefaults.standard.double(forKey: "site.zoom") == 1.25)
+    check("and a launch would read it back", Config.siteZoom == 1.25, "got \(Config.siteZoom)")
+    // Settings is reached THROUGH the page, so an unreadable page is a locked door.
+    s.siteZoom = 0
+    check("zero cannot blank the page", s.effectiveSiteZoom >= 0.5, "got \(s.effectiveSiteZoom)")
+    check("and a launch clamps it too", Config.siteZoom >= 0.5, "got \(Config.siteZoom)")
+    s.siteZoom = 99
+    check("nor can an absurd value", s.effectiveSiteZoom <= 3.0, "got \(s.effectiveSiteZoom)")
+    check("clamped at launch as well", Config.siteZoom <= 3.0, "got \(Config.siteZoom)")
+    s.siteZoom = AppSettings.defaultSiteZoom
+
+    print("Test 6 - clearing a field removes it rather than storing a blank")
     s.homeURL = ""
     check("key removed", UserDefaults.standard.object(forKey: "home.url") == nil)
     check("and reads back as unset", s.home == nil)

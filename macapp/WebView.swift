@@ -116,6 +116,10 @@ final class WebController: NSObject, ObservableObject {
         let fresh = WKWebView(frame: .zero, configuration: config)
         fresh.allowsBackForwardNavigationGestures = true
         fresh.allowsMagnification = true
+        // Sites are drawn larger than they ship. Page zoom reflows the layout, unlike
+        // magnification, which scales the finished picture and pushes the right-hand
+        // side of a table off the window.
+        fresh.pageZoom = AppSettings.shared.effectiveSiteZoom
         fresh.underPageBackgroundColor = .windowBackgroundColor
         // Trackers serve different (worse) pages to anything that looks automated.
         fresh.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -136,6 +140,12 @@ final class WebController: NSObject, ObservableObject {
         ]
         webView = fresh
         old?.stopLoading()
+    }
+
+    /// Zoom is a property of the view rather than of its data store, so changing it
+    /// needs neither a fresh web view nor a reload -- the page reflows in place.
+    func applyZoom() {
+        webView.pageZoom = AppSettings.shared.effectiveSiteZoom
     }
 
     /// Whatever is on screen, so a rebuild can put the user back where they were.
