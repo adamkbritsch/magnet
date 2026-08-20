@@ -168,7 +168,13 @@ struct RootView: View {
     private func goHome() { if let homeURL { web.load(homeURL) } }
 
     private func syncPlugins() {
-        plugins.syncIfNeeded(sites: bookmarks.visible.map(\.url), alsoKnownAs: Self.mirrorDomains)
+        // The home site counts. Its chip is usually hidden because the Home button
+        // already goes there, and it is the site used most of all.
+        var sites = bookmarks.visible.map(\.url)
+        if let home = settings.home, !sites.contains(where: { $0.host == home.host }) {
+            sites.insert(home, at: 0)
+        }
+        plugins.syncIfNeeded(sites: sites, alsoKnownAs: Self.mirrorDomains)
     }
 
     /// Every domain a site is also known by, so a chip saved at last month's mirror
@@ -1013,15 +1019,24 @@ private struct ClientTab: View {
 
     /// What each site in the bar maps to, worked out locally so the list is honest
     /// before anything is installed rather than only after a sync has run.
+    /// Exactly what a sync would act on, so the list below and the button agree.
+    private var syncedSites: [URL] {
+        var sites = bookmarks.visible.map(\.url)
+        if let home = settings.home, !sites.contains(where: { $0.host == home.host }) {
+            sites.insert(home, at: 0)
+        }
+        return sites
+    }
+
     private var coverage: [(site: String, plugin: String?)] {
         var seen = Set<String>()
         var rows: [(String, String?)] = []
-        for bm in bookmarks.visible {
-            guard let host = bm.url.host else { continue }
+        for url in syncedSites {
+            guard let host = url.host, SearchPluginPlan.isSearchableSite(host) else { continue }
             let domain = registrableDomain(host)
             guard !seen.contains(domain) else { continue }
             seen.insert(domain)
-            let candidates = [domain] + RootView.mirrorDomains(bm.url).map { registrableDomain($0) }
+            let candidates = [domain] + RootView.mirrorDomains(url).map { registrableDomain($0) }
             let match = candidates.lazy.compactMap { SearchPluginCatalogue.plugin(forDomain: $0) }.first
             rows.append((domain, match?.site))
         }
@@ -1066,8 +1081,7 @@ private struct ClientTab: View {
 
                 HStack(spacing: 8) {
                     Button(plugins.busy ? "Syncing\u{2026}" : "Sync Now") {
-                        plugins.syncNow(sites: bookmarks.visible.map(\.url),
-                                        alsoKnownAs: RootView.mirrorDomains)
+                        plugins.syncNow(sites: syncedSites, alsoKnownAs: RootView.mirrorDomains)
                     }
                     .disabled(plugins.busy || settings.qbBase == nil)
                     if !plugins.status.isEmpty {

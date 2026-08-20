@@ -137,6 +137,20 @@ plan = SearchPluginPlan.make(sites: [u("magnet:?xt=urn:btih:abc")], installed: [
 check("a magnet link is not a site", plan.install.isEmpty && plan.unmatched.isEmpty,
       "\(plan.unmatched)")
 
+print("Test 7b - a box on the network is not a site")
+plan = SearchPluginPlan.make(sites: [u("http://192.168.1.10:8787/"), u("http://nas:5000/"),
+                                     u("http://[fe80::1]/"), u("https://nyaa.si/")],
+                             installed: [])
+// Four dashboards reported as "no published plugin" would bury the one site that
+// genuinely has none.
+check("a LAN address is not reported as a missing plugin", plan.unmatched.isEmpty,
+      "\(plan.unmatched)")
+check("and the real site is still planned", plan.install.map(\.id) == ["nyaasi"],
+      "\(plan.install.map(\.id))")
+check("an ordinary domain still counts", SearchPluginPlan.isSearchableSite("nyaa.si"))
+check("an IPv4 literal does not", !SearchPluginPlan.isSearchableSite("10.0.0.42"))
+check("a bare hostname does not", !SearchPluginPlan.isSearchableSite("localhost"))
+
 print("Test 8 - the summary reports every outcome")
 let full = SearchPluginSync.summary(covered: 2, installed: ["Nyaa"], failed: ["YTS"],
                                     unmatched: ["knaben.org"])
