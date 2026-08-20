@@ -177,6 +177,13 @@ plugins are never removed, because hiding a chip for an afternoon is a reversibl
 action and uninstalling is not. Sites with no published plugin are named rather than
 passed over, so "nothing to do" cannot be mistaken for "everything is searchable".
 
+Where qBittorrent ships its own plugin for a site, that is the one installed. A
+community fork under the same engine name does not sit alongside the official one, it
+replaces it — and installing one is how you silently downgrade a working plugin. Where
+a site has two plugins in circulation under *different* names, a client that already
+has the other one is left alone, because two plugins for one site is not an error the
+client reports: it just returns everything twice.
+
 A plugin URL that has rotted fails silently: the client accepts the request, fetches
 nothing, and ends up without the plugin. `tools/tests/run.sh --live` fetches every
 address in the catalogue and checks it is still a working plugin.
