@@ -210,13 +210,6 @@ extension WebController: WKNavigationDelegate {
         // ad does on the first click anywhere.
         let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
         if isMainFrame, url.scheme?.lowercased() != "magnet" {
-            // A click starts a NEW chain, aimed at wherever the link said it went. The
-            // redirects that follow are then judged against that, which is what catches
-            // an on-site redirector bouncing the window off to an advertiser.
-            if navigationAction.navigationType == .linkActivated {
-                chain = RedirectGuard.Chain(appInitiated: false,
-                                            anchorDomain: url.host.map(registrableDomain))
-            }
             let kind: RedirectGuard.NavigationKind
             switch navigationAction.navigationType {
             case .linkActivated, .formSubmitted, .formResubmitted: kind = .userLink
@@ -235,6 +228,16 @@ extension WebController: WKNavigationDelegate {
                                             confirmedTarget: confirmed) {
                 case .allow:
                     pendingConfirm = nil
+                    // Only now. Setting the anchor before the decision aimed the chain
+                    // at the very URL being judged, so `anchor == destination` always
+                    // held and every click was allowed -- which is why a link straight
+                    // to an advertiser sailed through, and the block you saw was a
+                    // later hop, once the page was already there.
+                    if kind == .userLink {
+                        chain = RedirectGuard.Chain(
+                            appInitiated: false,
+                            anchorDomain: url.host.map(registrableDomain))
+                    }
                 case .block:
                     showToast("Blocked a redirect to \(url.host ?? "another site")", isError: false)
                     decisionHandler(.cancel)
@@ -290,6 +293,13 @@ extension WebController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         navigationInFlight = true
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // Spent. It covered this navigation and its redirects; it does not extend to
+        // whatever the page does once it is on screen.
+        chain.appInitiated = false
+        chain.anchorDomain = webView.url?.host.map(registrableDomain) ?? chain.anchorDomain
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
