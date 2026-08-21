@@ -271,7 +271,9 @@ extension WebController: WKNavigationDelegate {
                             anchorDomain: url.host.map(registrableDomain))
                     }
                 case .block:
-                    showToast("Blocked a redirect to \(url.host ?? "another site")", isError: false)
+                    // Silently. A redirect you never asked for is not an event worth
+                    // reporting -- announcing the block is its own interruption, and
+                    // it arrives exactly as often as the adverts do.
                     decisionHandler(.cancel)
                     return
                 case .confirm:
@@ -322,13 +324,27 @@ extension WebController: WKNavigationDelegate {
     func webView(_ webView: WKWebView,
                  navigationResponse: WKNavigationResponse,
                  didBecome download: WKDownload) {
-        DownloadManager.shared.attach(download, page: webView.url)
+        admit(download, page: webView.url)
     }
 
     func webView(_ webView: WKWebView,
                  navigationAction: WKNavigationAction,
                  didBecome download: WKDownload) {
-        DownloadManager.shared.attach(download, page: webView.url)
+        // This path skips the response policy step entirely, so the check has to be
+        // repeated here or it is not a check at all.
+        admit(download, page: webView.url)
+    }
+
+    /// Take the download, or cancel it and say why.
+    private func admit(_ download: WKDownload, page: URL?) {
+        let url = download.originalRequest?.url
+        if let why = DownloadManager.shared.refusalReason(forDownloadOf: url, page: page,
+                                                          userInitiated: navigationWasClicked) {
+            download.cancel(nil)
+            showToast(why, isError: true)
+            return
+        }
+        DownloadManager.shared.attach(download, page: page)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

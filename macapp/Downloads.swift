@@ -138,17 +138,47 @@ final class DownloadManager: NSObject, ObservableObject {
         let header = (response.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
         let fileURL = response.response.url
-        let pageDomain = pageURL?.host.map(registrableDomain)
-        let fileDomain = fileURL?.host.map(registrableDomain)
         return Self.disposition(
             canShowMIMEType: response.canShowMIMEType,
             isAttachment: header.contains("attachment"),
             filename: fileURL?.lastPathComponent ?? "",
             fromKnownSource: pageURL.map(isKnownSource) ?? false,
-            fileFromTrustedHost: fileURL.map(isKnownSource) ?? false
-                || (fileDomain != nil && fileDomain == pageDomain),
+            fileFromTrustedHost: isTrustedFileHost(fileURL, pageURL: pageURL),
             fileHost: fileURL?.host ?? "somewhere else",
             userInitiated: userInitiated)
+    }
+
+    /// The other door.
+    ///
+    /// A download that begins as a navigation ACTION never reaches the response
+    /// policy step -- WebKit turns it straight into a download -- so a gate placed
+    /// only there is not a gate. `<a download>` and a script-synthesised click both
+    /// come through here, which is exactly what a first-click hijack uses: you click
+    /// anything at all, a handler you did not know was listening starts a download,
+    /// and no policy step ever sees it.
+    ///
+    /// Returns the reason to refuse, or nil to let it proceed.
+    func refusalReason(forDownloadOf fileURL: URL?, page: URL?, userInitiated: Bool) -> String? {
+        let outcome = Self.disposition(
+            canShowMIMEType: false,          // it is already a download
+            isAttachment: true,
+            filename: fileURL?.lastPathComponent ?? "",
+            fromKnownSource: page.map(isKnownSource) ?? false,
+            fileFromTrustedHost: isTrustedFileHost(fileURL, pageURL: page),
+            fileHost: fileURL?.host ?? "somewhere else",
+            userInitiated: userInitiated)
+        if case .refuse(let why) = outcome { return why }
+        return nil
+    }
+
+    /// Whether this host has any business handing over a file: a site in the bar, the
+    /// site being read, or one added by hand after being refused once.
+    func isTrustedFileHost(_ fileURL: URL?, pageURL: URL?) -> Bool {
+        guard let fileURL, let host = fileURL.host else { return false }
+        if isKnownSource(fileURL) { return true }
+        let domain = registrableDomain(host)
+        if let pageHost = pageURL?.host, registrableDomain(pageHost) == domain { return true }
+        return Config.allowedDownloadHosts.contains(domain)
     }
 
     /// Extensions that run code on the machine they land on.
@@ -185,19 +215,25 @@ final class DownloadManager: NSObject, ObservableObject {
         let offered = !canShowMIMEType || isAttachment
 
         if !fileFromTrustedHost, offered {
-            // Nothing on these sites needs a stranger to hand this Mac something that
-            // runs. A real installer comes from the site you are reading or from one
-            // you bookmarked, and both of those are trusted hosts.
+            // A click is no longer evidence of anything. The hijack listens for the
+            // first click ANYWHERE on the page and starts the download from it, so
+            // "the user clicked" is true of the fake ones too -- which is why scoping
+            // this to executables was not enough.
+            //
+            // So: a host with no relationship to the site being read does not get to
+            // put a file on this Mac. Naming it is the whole escape hatch -- a real
+            // file host is added once in Settings and never asks again, and an
+            // advert's host is simply never added.
+            let name = filename.isEmpty ? "a file" : filename
             if isExecutable(filename) {
-                return .refuse("Blocked an app download from \(fileHost) — it did not "
-                               + "come from this site.")
+                return .refuse("Blocked an app download (\(name)) from \(fileHost). "
+                               + "It did not come from this site.")
             }
-            // A download nobody asked for. A click is what separates a file you wanted
-            // from one a script started while you were reading.
             if !userInitiated {
-                return .refuse("Blocked a download from \(fileHost) that started on "
-                               + "its own.")
+                return .refuse("Blocked \(name) from \(fileHost) — it started on its own.")
             }
+            return .refuse("Blocked \(name) from \(fileHost). If you meant it, add "
+                           + "that host in Settings \u{2192} Downloads.")
         }
 
         // Unrenderable, from a host with a reason to be handing it over. Taking it
