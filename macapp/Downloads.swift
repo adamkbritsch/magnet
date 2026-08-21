@@ -124,34 +124,90 @@ final class DownloadManager: NSObject, ObservableObject {
     /// Keyed on the PAGE, not the file's host: sites routinely hand the actual bytes
     /// to partner or CDN hosts on unrelated domains, so matching the response host
     /// would miss most real downloads.
-    func shouldCapture(_ response: WKNavigationResponse, pageURL: URL?) -> Bool {
-        let disposition = (response.response as? HTTPURLResponse)?
+    /// What to do with a response: take it, refuse it outright, or let the page have
+    /// it. Refusing is its own answer because allowing an unrenderable response is not
+    /// neutral -- WebKit paints the raw bytes and the window fills with junk.
+    enum Disposition: Equatable {
+        case capture
+        case refuse(String)
+        case allow
+    }
+
+    func disposition(_ response: WKNavigationResponse,
+                     pageURL: URL?, userInitiated: Bool) -> Disposition {
+        let header = (response.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
-        return Self.shouldCapture(
+        let fileURL = response.response.url
+        let pageDomain = pageURL?.host.map(registrableDomain)
+        let fileDomain = fileURL?.host.map(registrableDomain)
+        return Self.disposition(
             canShowMIMEType: response.canShowMIMEType,
-            isAttachment: disposition.contains("attachment"),
-            filename: response.response.url?.lastPathComponent ?? "",
-            fromKnownSource: pageURL.map(isKnownSource) ?? false)
+            isAttachment: header.contains("attachment"),
+            filename: fileURL?.lastPathComponent ?? "",
+            fromKnownSource: pageURL.map(isKnownSource) ?? false,
+            fileFromTrustedHost: fileURL.map(isKnownSource) ?? false
+                || (fileDomain != nil && fileDomain == pageDomain),
+            fileHost: fileURL?.host ?? "somewhere else",
+            userInitiated: userInitiated)
+    }
+
+    /// Extensions that run code on the machine they land on.
+    ///
+    /// Not blocked as a class: a repack site's whole purpose is to hand you an
+    /// installer, and those are filed under Games on purpose. It is the COMBINATION
+    /// of "runs code" and "came from a host with nothing to do with the site you are
+    /// reading" that has no legitimate reading.
+    nonisolated static func isExecutable(_ filename: String) -> Bool {
+        switch (filename as NSString).pathExtension.lowercased() {
+        case "exe", "msi", "dmg", "pkg", "apk", "app", "scr", "bat", "cmd", "com",
+             "jar", "vbs", "js", "jse", "wsf", "hta", "ps1", "sh", "dll", "deb", "rpm":
+            return true
+        default:
+            return false
+        }
     }
 
     /// The decision, separated from WebKit so the truth table can be tested.
     ///
-    /// The ordering matters, and used to be wrong. Whether the page is a site we know
-    /// governs WHERE a file is filed; it must never govern whether we take it at all.
-    /// A response WebKit cannot display, allowed through, gets rendered as text -- the
-    /// window fills with raw bytes and reads as a broken page.
-    nonisolated static func shouldCapture(canShowMIMEType: Bool,
-                                          isAttachment: Bool,
-                                          filename: String,
-                                          fromKnownSource: Bool) -> Bool {
-        // Unrenderable, from anywhere. Taking it always beats showing the bytes.
-        if !canShowMIMEType { return true }
-        // The server said so outright.
-        if isAttachment { return true }
+    /// Ordering matters, and has been wrong before. Whether the PAGE is a site we know
+    /// governs WHERE a file is filed; it must never govern whether we take it at all,
+    /// or an unrenderable response gets rendered as text. What governs whether we take
+    /// it is where the FILE came from, which is a different question and was not being
+    /// asked at all: a decoy download button among the real ones served an installer
+    /// from an advert's own host, and it was captured and filed like anything else.
+    nonisolated static func disposition(canShowMIMEType: Bool,
+                                        isAttachment: Bool,
+                                        filename: String,
+                                        fromKnownSource: Bool,
+                                        fileFromTrustedHost: Bool,
+                                        fileHost: String,
+                                        userInitiated: Bool) -> Disposition {
+        let offered = !canShowMIMEType || isAttachment
+
+        if !fileFromTrustedHost, offered {
+            // Nothing on these sites needs a stranger to hand this Mac something that
+            // runs. A real installer comes from the site you are reading or from one
+            // you bookmarked, and both of those are trusted hosts.
+            if isExecutable(filename) {
+                return .refuse("Blocked an app download from \(fileHost) — it did not "
+                               + "come from this site.")
+            }
+            // A download nobody asked for. A click is what separates a file you wanted
+            // from one a script started while you were reading.
+            if !userInitiated {
+                return .refuse("Blocked a download from \(fileHost) that started on "
+                               + "its own.")
+            }
+        }
+
+        // Unrenderable, from a host with a reason to be handing it over. Taking it
+        // always beats showing the bytes.
+        if !canShowMIMEType { return .capture }
+        if isAttachment { return .capture }
         // Below here is a guess about something WebKit COULD display, so it is scoped
         // to sites we actually know.
-        guard fromKnownSource else { return false }
-        return kind(of: filename) != .unknown
+        guard fromKnownSource else { return .allow }
+        return kind(of: filename) != .unknown ? .capture : .allow
     }
 
     /// A link opened from a known source that could plausibly be a file.

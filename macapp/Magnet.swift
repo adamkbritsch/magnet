@@ -210,6 +210,41 @@ actor MagnetSender {
         return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
     }
 
+    /// Whether this is a real magnet link and not something wearing the scheme.
+    ///
+    /// A magnet without an info hash cannot identify a torrent, so there is nothing a
+    /// client could do with it. Decoy links among the real ones are the reason to
+    /// check: the scheme is trivial to forge, the app hands anything using it straight
+    /// to the torrent client, and a client is a poor place to discover the difference.
+    nonisolated static func isValidMagnet(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "magnet" else { return false }
+        // `URLComponents` will not parse a magnet's query on its own, since the part
+        // after the scheme is not a path.
+        let raw = url.absoluteString
+        guard let q = raw.firstIndex(of: "?") else { return false }
+        let query = raw[raw.index(after: q)...]
+
+        for field in query.split(separator: "&") {
+            let parts = field.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2, parts[0].lowercased() == "xt" else { continue }
+            let value = parts[1].lowercased()
+            if value.hasPrefix("urn:btih:") {
+                let hash = value.dropFirst("urn:btih:".count)
+                // Either spelling of a v1 info hash.
+                if hash.count == 40, hash.allSatisfy({ $0.isHexDigit }) { return true }
+                if hash.count == 32,
+                   hash.allSatisfy({ ($0 >= "a" && $0 <= "z") || ($0 >= "2" && $0 <= "7") }) {
+                    return true
+                }
+            }
+            if value.hasPrefix("urn:btmh:") {
+                let hash = value.dropFirst("urn:btmh:".count)
+                if hash.count >= 68, hash.allSatisfy({ $0.isHexDigit }) { return true }
+            }
+        }
+        return false
+    }
+
     /// Magnet links carry a display name in `dn=`; much friendlier than the hash.
     nonisolated static func displayName(for magnet: URL) -> String {
         let comps = URLComponents(url: magnet, resolvingAgainstBaseURL: false)
