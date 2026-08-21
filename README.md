@@ -213,6 +213,15 @@ land on this Mac first and move to the share once whole — a download writes
 incrementally, and doing that over SMB is slow and leaves half-written files when
 the link drops.
 
+Where the file came FROM decides whether it is taken at all, which is a different
+question from where it is filed. A decoy download button among the real ones serves
+its payload from the advert's own host, so an executable offered by a host with
+nothing to do with the site being read is refused outright — while an installer from
+a repack site you bookmarked, which is the point of those sites, still works. So is a
+download that starts without a click. Magnet links are checked for an actual info hash
+before anything reaches the torrent client, since the scheme is trivial to forge and a
+torrent client is a poor place to discover a link was an advert.
+
 Where a file goes is decided by **what the site is**, using the same categories that
 group the bar. Point the archive root at a folder nothing else manages: if it is
 somewhere a media pipeline watches, captured files get imported and renamed out from

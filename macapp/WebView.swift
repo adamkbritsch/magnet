@@ -72,6 +72,10 @@ final class WebController: NSObject, ObservableObject {
     private var chain = RedirectGuard.Chain(appInitiated: true, anchorDomain: nil)
     /// True between starting a navigation and finishing it.
     private var navigationInFlight = false
+    /// Whether the navigation now in flight began with a click. A file offered by a
+    /// navigation nobody started is a different thing from one you asked for, and by
+    /// the time the response arrives that distinction is no longer visible.
+    private var navigationWasClicked = false
     /// A destination the user has been warned about, and how recently. Clicking the
     /// same link again inside the window lets it through.
     private var pendingConfirm: (url: URL, at: Date)?
@@ -185,6 +189,10 @@ final class WebController: NSObject, ObservableObject {
     }
 
     fileprivate func handleMagnet(_ url: URL) {
+        guard MagnetSender.isValidMagnet(url) else {
+            showToast("That link is not a real magnet — nothing was sent.", isError: true)
+            return
+        }
         let name = MagnetSender.displayName(for: url)
         showToast("Sending \(name)…", isError: false)
         guard let base = qbBase else {
@@ -215,6 +223,20 @@ extension WebController: WKNavigationDelegate {
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.allow); return }
+
+        // Carried to the response, which cannot see it. A server redirect keeps the
+        // click that started the chain -- following one is still something you asked
+        // for -- so this is only cleared by a navigation that began without one.
+        switch navigationAction.navigationType {
+        case .linkActivated, .formSubmitted, .formResubmitted, .backForward, .reload:
+            navigationWasClicked = true
+        case .other:
+            // A redirect arrives as `.other` with no way to tell it from a script
+            // navigation, so a chain that began with a click keeps its click.
+            if !navigationInFlight { navigationWasClicked = false }
+        @unknown default:
+            navigationWasClicked = false
+        }
 
         // A page sending the window somewhere else entirely, which is what a redirect
         // ad does on the first click anywhere.
@@ -282,11 +304,19 @@ extension WebController: WKNavigationDelegate {
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         // Anna's Archive serves its files as ordinary navigations, so without this
         // they either render as junk or silently do nothing.
-        if DownloadManager.shared.shouldCapture(navigationResponse, pageURL: webView.url) {
+        switch DownloadManager.shared.disposition(navigationResponse,
+                                                  pageURL: webView.url,
+                                                  userInitiated: navigationWasClicked) {
+        case .capture:
             decisionHandler(.download)
-            return
+        case .refuse(let why):
+            // Cancelled, not allowed: allowing an unrenderable response paints the
+            // raw bytes into the window.
+            showToast(why, isError: true)
+            decisionHandler(.cancel)
+        case .allow:
+            decisionHandler(.allow)
         }
-        decisionHandler(.allow)
     }
 
     func webView(_ webView: WKWebView,

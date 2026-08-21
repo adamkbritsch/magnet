@@ -64,27 +64,85 @@ check("archive root is not a watched folder", !forbidden.contains(DownloadManage
       "root=\(DownloadManager.archiveRoot)")
 
 print("Test 4b - a response WebKit cannot display is NEVER rendered as text")
-// This was the bug: the known-source check came first, so an unrenderable response
-// from an unrecognised page was allowed through and WebKit drew the raw bytes.
+func d(_ canShow: Bool, _ attach: Bool, _ name: String, _ knownPage: Bool,
+       _ trustedHost: Bool, _ clicked: Bool = true) -> DownloadManager.Disposition {
+    DownloadManager.disposition(canShowMIMEType: canShow, isAttachment: attach,
+                                filename: name, fromKnownSource: knownPage,
+                                fileFromTrustedHost: trustedHost,
+                                fileHost: "cdn.example", userInitiated: clicked)
+}
+func isRefusal(_ x: DownloadManager.Disposition) -> Bool {
+    if case .refuse = x { return true }
+    return false
+}
+
 check("unrenderable from an unknown page is still captured",
-      DownloadManager.shouldCapture(canShowMIMEType: false, isAttachment: false,
-                                    filename: "thing.bin", fromKnownSource: false))
+      d(false, false, "thing.bin", false, true) == .capture)
 check("unrenderable from a known page is captured",
-      DownloadManager.shouldCapture(canShowMIMEType: false, isAttachment: false,
-                                    filename: "thing.bin", fromKnownSource: true))
+      d(false, false, "thing.bin", true, true) == .capture)
 check("an explicit attachment is captured wherever it came from",
-      DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: true,
-                                    filename: "x", fromKnownSource: false))
+      d(true, true, "thing.bin", false, true) == .capture)
 check("an ordinary page is left alone",
-      !DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: false,
-                                     filename: "index.html", fromKnownSource: true))
-// Guessing by extension is only reasonable on a site we know.
+      d(true, false, "index.html", true, true) == .allow)
 check("a guessable file on a known site is captured",
-      DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: false,
-                                    filename: "book.epub", fromKnownSource: true))
+      d(true, false, "book.epub", true, true) == .capture)
 check("the same file on an unknown site is not",
-      !DownloadManager.shouldCapture(canShowMIMEType: true, isAttachment: false,
-                                     filename: "book.epub", fromKnownSource: false))
+      d(true, false, "book.epub", false, true) == .allow)
+
+print("Test 4c - a decoy download cannot put an installer on this Mac")
+// The bug: a fake download button among the real ones served an installer from the
+// advert's own host, and it was captured and filed like anything else.
+check("an installer from an UNRELATED host is refused",
+      isRefusal(d(false, false, "setup.exe", true, false)),
+      "\(d(false, false, "setup.exe", true, false))")
+check("even when the server calls it an attachment",
+      isRefusal(d(true, true, "installer.msi", true, false)))
+check("and for every shape of the same thing",
+      ["setup.exe", "a.msi", "b.dmg", "c.pkg", "d.apk", "e.scr", "f.bat", "g.jar",
+       "h.ps1", "i.vbs", "j.deb"].allSatisfy { isRefusal(d(false, false, $0, true, false)) })
+// The repack sites hand you an installer on purpose, and that must keep working.
+check("BUT an installer from the site you are on is still captured",
+      d(false, false, "setup.exe", true, true) == .capture)
+check("and from a bookmarked site's own host too",
+      d(true, true, "game-installer.exe", true, true) == .capture)
+// Torrent files and books routinely come from a CDN. Refusing those would break more
+// than it protects, and they do not run.
+check("a .torrent from a third-party host still works",
+      d(false, false, "thing.torrent", true, false) == .capture)
+check("so does an ebook from one",
+      d(false, false, "book.epub", true, false) == .capture)
+
+print("Test 4d - a download nobody started is refused")
+check("an untrusted host offering a file with no click is refused",
+      isRefusal(d(false, false, "thing.zip", true, false, false)))
+check("the same file after a click is taken",
+      d(false, false, "thing.zip", true, false, true) == .capture)
+check("a click is not required from a host you trust",
+      d(false, false, "thing.zip", true, true, false) == .capture)
+
+print("Test 4e - only a real magnet reaches the torrent client")
+func mag(_ s: String) -> Bool { MagnetSender.isValidMagnet(URL(string: s)!) }
+check("a v1 hex info hash is real",
+      mag("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Thing"))
+check("uppercase is the same hash",
+      mag("magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"))
+check("base32 is the other spelling",
+      mag("magnet:?xt=urn:btih:abcdefghijklmnopqrstuvwxyz234567"))
+check("so is a v2 multihash",
+      mag("magnet:?xt=urn:btmh:1220caf1e1e1caf1e1e1caf1e1e1caf1e1e1caf1e1e1caf1e1e1caf1e1e1caf1e1e1"))
+check("the hash can sit after other fields",
+      mag("magnet:?dn=Thing&tr=http%3A%2F%2Ftracker.example&xt=urn:btih:0123456789abcdef0123456789abcdef01234567"))
+// A decoy only has to wear the scheme, and the app hands anything wearing it to the
+// client. A torrent client is a poor place to find out it was an advert.
+check("a magnet with NO hash is refused", !mag("magnet:?dn=Free+Download"))
+check("a magnet with a truncated hash is refused",
+      !mag("magnet:?xt=urn:btih:0123456789abcdef"))
+check("a magnet whose hash is not hex is refused",
+      !mag("magnet:?xt=urn:btih:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"))
+check("a magnet carrying a URL instead of a hash is refused",
+      !mag("magnet:?xt=http://ad.example/track"))
+check("something that is not a magnet at all is refused",
+      !mag("https://ad.example/download"))
 
 print("Test 5 - a colliding destination gets a fresh name")
 let dir = URL(fileURLWithPath: NSTemporaryDirectory())
