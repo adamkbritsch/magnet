@@ -1177,6 +1177,7 @@ private struct ClientTab: View {
 private struct DownloadsTab: View {
     @ObservedObject var settings: AppSettings
     @State private var mountResult: String?
+    @State private var hostsText = ""
 
     var body: some View {
         ScrollView {
@@ -1214,6 +1215,17 @@ private struct DownloadsTab: View {
                     MonoField(placeholder: "Direct", text: $settings.archiveRoot, width: 180)
                 }
 
+                SettingRow(label: "File hosts allowed to send downloads",
+                           hint: "A site in the bar can always send you a file, and so "
+                               + "can the site you are reading. Anything else is "
+                               + "refused — that is what stops a page starting a "
+                               + "download off the back of a click you meant for "
+                               + "something else. When a real file host is refused, "
+                               + "its name is in the message; add it here once. "
+                               + "Comma separated.") {
+                    MonoField(placeholder: "1fichier.com, datanodes.to", text: $hostsText)
+                }
+
                 SettingRow(label: "Where each kind goes",
                            hint: "The site's own category decides; the file extension only breaks the tie for a site that covers several types.") {
                     HStack(spacing: 8) {
@@ -1242,6 +1254,23 @@ private struct DownloadsTab: View {
             }
             .padding(18)
         }
+        .onAppear { hostsText = settings.allowedDownloadHosts.joined(separator: ", ") }
+        .onDisappear { commitHosts() }
+    }
+
+    /// Stored as registrable domains, so a host added as a full URL or with a `www.`
+    /// still matches what a download actually arrives from.
+    private func commitHosts() {
+        let hosts = hostsText.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .map { entry -> String in
+                guard let url = URL(string: entry), let host = url.host else { return entry }
+                return host
+            }
+            .map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 }
+            .map { registrableDomain($0) }
+            .filter { !$0.isEmpty && $0.contains(".") }
+        if hosts != settings.allowedDownloadHosts { settings.allowedDownloadHosts = hosts }
     }
 
     private func mount() {

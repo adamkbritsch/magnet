@@ -107,6 +107,12 @@ final class AppSettings: ObservableObject {
     @Published var archiveLocalPath: String { didSet { put("archive.localPath", archiveLocalPath) } }
     /// Category raw value -> folder name.
     @Published var categoryFolders: [String: String] { didSet { put("archive.folders", categoryFolders) } }
+    /// File hosts allowed to hand this Mac a download even though they are not a site
+    /// in the bar. Empty by default: a real one gets added the first time it is
+    /// refused, and an advert's host never does.
+    @Published var allowedDownloadHosts: [String] {
+        didSet { put("downloads.allowedHosts", allowedDownloadHosts) }
+    }
 
     /// A share can only be mounted if we know all three.
     var nasConfigured: Bool {
@@ -200,6 +206,8 @@ final class AppSettings: ObservableObject {
         categoryFolders = (d.dictionary(forKey: "archive.folders") as? [String: String])
             ?? AppSettings.defaultCategoryFolders
 
+        allowedDownloadHosts = d.stringArray(forKey: "downloads.allowedHosts") ?? []
+
         curatedMirrors = ((d.array(forKey: "mirrors.curated") as? [[String: Any]]) ?? [])
             .compactMap(CuratedMirror.init(plist:))
         fmhyEnabled = (d.object(forKey: "mirrors.fmhy.enabled") as? Bool) ?? true
@@ -234,7 +242,7 @@ final class AppSettings: ObservableObject {
                     "qb.baseURL", "qb.keychainService", "qb.syncPlugins",
                     "qb.plugins.signature", "qb.plugins.failed",
                     "nas.host", "nas.share", "nas.user", "archive.root",
-                    "archive.localPath", "archive.folders",
+                    "archive.localPath", "archive.folders", "downloads.allowedHosts",
                     "mirrors.curated", "mirrors.fmhy.enabled", "mirrors.refreshHours",
                     "style.enabled", "style.css", "style.theme", "site.zoom"] {
             d.removeObject(forKey: key)
@@ -278,6 +286,12 @@ enum Config {
     static var archiveRoot: String {
         let s = string("archive.root")
         return s.isEmpty ? "Direct" : s
+    }
+
+    static var allowedDownloadHosts: Set<String> {
+        Set((d.stringArray(forKey: "downloads.allowedHosts") ?? [])
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .filter { !$0.isEmpty })
     }
 
     static var localRoot: URL {

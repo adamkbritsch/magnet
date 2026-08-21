@@ -214,13 +214,23 @@ incrementally, and doing that over SMB is slow and leaves half-written files whe
 the link drops.
 
 Where the file came FROM decides whether it is taken at all, which is a different
-question from where it is filed. A decoy download button among the real ones serves
-its payload from the advert's own host, so an executable offered by a host with
-nothing to do with the site being read is refused outright — while an installer from
-a repack site you bookmarked, which is the point of those sites, still works. So is a
-download that starts without a click. Magnet links are checked for an actual info hash
-before anything reaches the torrent client, since the scheme is trivial to forge and a
-torrent client is a poor place to discover a link was an advert.
+question from where it is filed. **A host with no relationship to the page being read
+does not get to put a file on this Mac.** The site in the bar can, and so can the site
+you are reading; anything else is refused and named, and a file host you genuinely use
+is added once under Settings → Downloads.
+
+That rule is deliberately blunt, because the narrower ones do not hold. A forced
+download is not always an executable, and it is not always something you clicked: the
+usual trick listens for the first click *anywhere* on the page and starts the download
+from it, so "the user clicked" is true of the fake ones too.
+
+Both doors are gated. A download that begins as a navigation **action** never reaches
+the response policy step at all — `<a download>` and a script-synthesised click come
+through that way — so a check placed only on the response is not a check.
+
+Magnet links are checked for an actual info hash before anything reaches the torrent
+client, since the scheme is trivial to forge and a torrent client is a poor place to
+discover a link was an advert.
 
 Where a file goes is decided by **what the site is**, using the same categories that
 group the bar. Point the archive root at a folder nothing else manages: if it is

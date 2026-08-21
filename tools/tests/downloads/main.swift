@@ -107,16 +107,38 @@ check("and from a bookmarked site's own host too",
       d(true, true, "game-installer.exe", true, true) == .capture)
 // Torrent files and books routinely come from a CDN. Refusing those would break more
 // than it protects, and they do not run.
-check("a .torrent from a third-party host still works",
-      d(false, false, "thing.torrent", true, false) == .capture)
-check("so does an ebook from one",
-      d(false, false, "book.epub", true, false) == .capture)
+// These used to be allowed through on the grounds that they do not run. They still
+// do not run, but they still arrive unasked, and a file host that is genuinely used
+// is named in the refusal and added once in Settings.
+check("a .torrent from a third-party host is refused until its host is allowed",
+      isRefusal(d(false, false, "thing.torrent", true, false)))
+check("an ebook from one likewise",
+      isRefusal(d(false, false, "book.epub", true, false)))
 
-print("Test 4d - a download nobody started is refused")
+print("Test 4d - a click is no longer evidence of anything")
+// The escalation: the hijack listens for the first click ANYWHERE and starts the
+// download from it, so "the user clicked" is true of the fake ones too. Scoping the
+// refusal to executables was not enough, because the payload does not have to be one.
+check("a zip from an unrelated host is refused even after a click",
+      isRefusal(d(false, false, "totally-normal.zip", true, false, true)))
+check("so is a rar", isRefusal(d(false, false, "part1.rar", true, false, true)))
+check("and an attachment it calls a document",
+      isRefusal(d(true, true, "invoice.pdf", true, false, true)))
+check("a download nobody started at all is refused",
+      isRefusal(d(false, false, "thing.zip", true, false, false)))
+// The escape hatch has to actually work, or repack sites stop working.
+check("but a trusted host needs no click",
+      d(false, false, "thing.zip", true, true, false) == .capture)
+check("and a trusted host may hand over anything",
+      d(false, false, "setup.exe", true, true, true) == .capture)
+
+print("Test 4d2 - a download nobody started is refused")
 check("an untrusted host offering a file with no click is refused",
       isRefusal(d(false, false, "thing.zip", true, false, false)))
-check("the same file after a click is taken",
-      d(false, false, "thing.zip", true, false, true) == .capture)
+// Used to be captured, on the theory that a click meant you asked for it. It does
+// not: the hijack fires off a click you meant for something else entirely.
+check("the same file after a click is STILL refused",
+      isRefusal(d(false, false, "thing.zip", true, false, true)))
 check("a click is not required from a host you trust",
       d(false, false, "thing.zip", true, true, false) == .capture)
 
