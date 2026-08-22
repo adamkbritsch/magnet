@@ -189,7 +189,10 @@ final class WebController: NSObject, ObservableObject {
     }
 
     fileprivate func handleMagnet(_ url: URL) {
-        guard MagnetSender.isValidMagnet(url) else {
+        // Only a magnet claims to carry an info hash. A .torrent link is an ordinary
+        // URL that the client fetches itself -- checking it for a hash rejected every
+        // real one, which is a bug this guard introduced.
+        if url.scheme?.lowercased() == "magnet", !MagnetSender.isValidMagnet(url) {
             showToast("That link is not a real magnet — nothing was sent.", isError: true)
             return
         }
@@ -287,14 +290,26 @@ extension WebController: WKNavigationDelegate {
         }
 
         // The whole point of the old Torrent Control extension, done natively.
+        //
+        // Only from an actual link activation. A torrent handed to the client is a
+        // download that starts, and a page that can reach this by assigning to
+        // `location` gets to start one whenever you click anything at all -- which is
+        // how a click on something unrelated turns into a torrent you did not choose.
+        // A real magnet link is an anchor, and clicking an anchor is `.linkActivated`;
+        // script-driven navigation is not.
+        let activated: Bool
+        switch navigationAction.navigationType {
+        case .linkActivated, .formSubmitted, .formResubmitted: activated = true
+        default: activated = false
+        }
         if url.scheme?.lowercased() == "magnet" {
-            handleMagnet(url)
+            if activated { handleMagnet(url) }
             decisionHandler(.cancel)
             return
         }
         // A .torrent file link is the other way trackers hand over a torrent.
         if url.pathExtension.lowercased() == "torrent" {
-            handleMagnet(url)
+            if activated { handleMagnet(url) }
             decisionHandler(.cancel)
             return
         }

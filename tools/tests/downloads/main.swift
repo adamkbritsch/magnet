@@ -165,6 +165,12 @@ check("a magnet carrying a URL instead of a hash is refused",
       !mag("magnet:?xt=http://ad.example/track"))
 check("something that is not a magnet at all is refused",
       !mag("https://ad.example/download"))
+// A .torrent link is an ordinary URL the client fetches for itself. Checking one for
+// an info hash rejected every real one -- the guard above, applied where it does not
+// belong. It only ever applies to the magnet scheme.
+check("a .torrent link is NOT judged as a magnet",
+      !mag("https://tracker.example/download/123/thing.torrent"),
+      "the validator answers for magnets only; the caller must not ask about .torrent")
 
 print("Test 5 - a colliding destination gets a fresh name")
 let dir = URL(fileURLWithPath: NSTemporaryDirectory())
