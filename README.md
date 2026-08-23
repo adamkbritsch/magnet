@@ -219,7 +219,15 @@ does not get to put a file on this Mac.** The site in the bar can, and so can th
 you are reading; anything else is refused and named, and a file host you genuinely use
 is added once under Settings → Downloads.
 
-That rule is deliberately blunt, because the narrower ones do not hold. A forced
+**And every direct download asks first, in a dialog.** Origin rules are not enough
+and the reason is worth stating: the payload that prompted this was served from the
+*same domain as the site being read*, which makes it a trusted host under any rule
+drawn from where a file came from. No test of origin can separate that from a real
+download. The decision belongs with a person looking at the filename, and a host you
+approve once is never asked about again.
+
+The rule below still runs first, so obvious junk is refused without a dialog at all.
+It is deliberately blunt, because the narrower rules do not hold. A forced
 download is not always an executable, and it is not always something you clicked: the
 usual trick listens for the first click *anywhere* on the page and starts the download
 from it, so "the user clicked" is true of the fake ones too.

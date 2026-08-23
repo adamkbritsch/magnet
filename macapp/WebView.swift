@@ -325,7 +325,19 @@ extension WebController: WKNavigationDelegate {
                                                   pageURL: webView.url,
                                                   userInitiated: navigationWasClicked) {
         case .capture:
-            decisionHandler(.download)
+            // Asked here rather than after the download object exists, so a refusal
+            // never opens a connection at all.
+            let url = navigationResponse.response.url
+            if DownloadManager.shared.isPreApproved(url) {
+                decisionHandler(.download)
+                return
+            }
+            let size = navigationResponse.response.expectedContentLength
+            let approved = DownloadManager.approve(
+                filename: url?.lastPathComponent ?? "",
+                host: url?.host ?? "an unknown host",
+                bytes: size > 0 ? size : nil)
+            decisionHandler(approved ? .download : .cancel)
         case .refuse(let why):
             // Cancelled, not allowed: allowing an unrenderable response paints the
             // raw bytes into the window.
@@ -350,16 +362,29 @@ extension WebController: WKNavigationDelegate {
         admit(download, page: webView.url)
     }
 
-    /// Take the download, or cancel it and say why.
+    /// Take the download, or cancel it. Nothing is written without an answer.
     private func admit(_ download: WKDownload, page: URL?) {
         let url = download.originalRequest?.url
-        if let why = DownloadManager.shared.refusalReason(forDownloadOf: url, page: page,
-                                                          userInitiated: navigationWasClicked) {
+        let manager = DownloadManager.shared
+        if let why = manager.refusalReason(forDownloadOf: url, page: page,
+                                           userInitiated: navigationWasClicked) {
             download.cancel(nil)
             showToast(why, isError: true)
             return
         }
-        DownloadManager.shared.attach(download, page: page)
+        // A host approved once is not asked about again; everything else asks.
+        if !manager.isPreApproved(url) {
+            let approved = DownloadManager.approve(
+                filename: url?.lastPathComponent ?? "",
+                host: url?.host ?? "an unknown host",
+                bytes: download.progress.totalUnitCount > 0
+                    ? download.progress.totalUnitCount : nil)
+            guard approved else {
+                download.cancel(nil)
+                return
+            }
+        }
+        manager.attach(download, page: page)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
