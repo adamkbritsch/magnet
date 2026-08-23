@@ -158,6 +158,12 @@ final class DownloadManager: NSObject, ObservableObject {
     /// and no policy step ever sees it.
     ///
     /// Returns the reason to refuse, or nil to let it proceed.
+    /// True when this host has been approved once and asked not to be asked again.
+    func isPreApproved(_ fileURL: URL?) -> Bool {
+        guard let host = fileURL?.host else { return false }
+        return Config.allowedDownloadHosts.contains(registrableDomain(host))
+    }
+
     func refusalReason(forDownloadOf fileURL: URL?, page: URL?, userInitiated: Bool) -> String? {
         let outcome = Self.disposition(
             canShowMIMEType: false,          // it is already a download
@@ -179,6 +185,48 @@ final class DownloadManager: NSObject, ObservableObject {
         let domain = registrableDomain(host)
         if let pageHost = pageURL?.host, registrableDomain(pageHost) == domain { return true }
         return Config.allowedDownloadHosts.contains(domain)
+    }
+
+    /// Asks, in a dialog, before anything is written.
+    ///
+    /// Every origin rule failed against the real thing: the payload was served from
+    /// the SAME domain as the site being read, which makes it a trusted host under any
+    /// definition drawn from where it came from. Five copies landed under Games --
+    /// identical size, all different hashes, which is a dropper stamping a tracking id
+    /// per download -- and the last arrived with every one of those rules in force.
+    ///
+    /// So the decision moves to the only place that cannot be spoofed by a page: a
+    /// person looking at the filename. Nothing is written without an answer here.
+    @MainActor
+    static func approve(filename: String, host: String, bytes: Int64?) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Download \(filename.isEmpty ? "this file" : filename)?"
+        var detail = "From \(host)."
+        if let bytes, bytes > 0 {
+            detail += " " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) + "."
+        }
+        detail += "\n\nIf you did not just ask for this file, say no. Sites here start "
+            + "downloads from a click on anything at all."
+        alert.informativeText = detail
+        // Cancel first, so it is the default and Return does not accept a download
+        // that appeared while you were reading.
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Download")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Always allow downloads from \(host)"
+
+        let response = alert.runModal()
+        let approved = response == .alertSecondButtonReturn
+        if approved, alert.suppressionButton?.state == .on, !host.isEmpty {
+            var hosts = AppSettings.shared.allowedDownloadHosts
+            let domain = registrableDomain(host)
+            if !hosts.contains(domain) {
+                hosts.append(domain)
+                AppSettings.shared.allowedDownloadHosts = hosts
+            }
+        }
+        return approved
     }
 
     /// Extensions that run code on the machine they land on.

@@ -142,6 +142,22 @@ check("the same file after a click is STILL refused",
 check("a click is not required from a host you trust",
       d(false, false, "thing.zip", true, true, false) == .capture)
 
+print("Test 4f - the payload that actually got through")
+// OperaSetup.zip, five copies under Games, identical size and all different hashes.
+// Every origin rule missed it, and this is why:
+check("it is not an executable by extension, so that rule never fired",
+      !DownloadManager.isExecutable("OperaSetup.zip"))
+check("and .zip is filed as software, which is how it reached Games",
+      DownloadManager.kind(of: "OperaSetup.zip") == .software)
+// The decisive one: served from the SAME domain as the site being read, which is a
+// trusted host under any rule drawn from where a file came from. No origin test can
+// separate that from a real download, which is why approval moved to a dialog.
+check("from the page's own domain it passes every origin check",
+      d(false, false, "OperaSetup.zip", true, true) == .capture,
+      "an origin rule cannot catch this — the dialog is the guard")
+check("only from a third-party host does an origin rule catch it",
+      isRefusal(d(false, false, "OperaSetup.zip", true, false)))
+
 print("Test 4e - only a real magnet reaches the torrent client")
 func mag(_ s: String) -> Bool { MagnetSender.isValidMagnet(URL(string: s)!) }
 check("a v1 hex info hash is real",
