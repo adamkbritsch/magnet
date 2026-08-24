@@ -69,6 +69,23 @@ fi
 # The filter lists are generated, not checked in -- 16 MB of derived JSON does not
 # belong in git, and a committed copy is stale the day after it lands. Failing here is
 # not fatal: the app reports "No filter lists bundled" and browses unprotected.
+# Filter lists rot. uBO updates EasyList every few days because ad networks rotate
+# domains constantly; a month-old snapshot lets current redirect-ad hosts straight
+# through, and that failure is invisible -- the shield still says "Blocking". A
+# 26-day-old set is what let the click-hijack scripts in. Refresh when stale, and
+# keep the old set if the network is down: stale beats none.
+STALE_DAYS=7
+if compgen -G "$SRC/blocklist-*.json" >/dev/null; then
+  newest=$(find "$SRC" -maxdepth 1 -name 'blocklist-*.json' -mtime -${STALE_DAYS} | head -1)
+  if [[ -z "$newest" ]]; then
+    echo "==> Filter lists are over ${STALE_DAYS} days old; refreshing from upstream"
+    if python3 "$ROOT/tools/build-blocklist.py" 2>&1 | tail -2 | sed 's/^/    /'; then
+      :
+    else
+      echo "    refresh failed; keeping the previous lists"
+    fi
+  fi
+fi
 if ! compgen -G "$SRC/blocklist-*.json" >/dev/null; then
   echo "==> Building filter lists (first run; a few minutes)"
   if command -v python3 >/dev/null && [[ -f "$ROOT/tools/build-blocklist.py" ]]; then
