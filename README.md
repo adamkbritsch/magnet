@@ -280,8 +280,16 @@ it just made reports as a link activation, indistinguishable from a real one, an
 armed confirmation was honoured for *any* later navigation to the same URL — so the
 advert fired twice and confirmed itself. A modal dialog is the one surface a page
 cannot click. Refusing a host silences it for the session, and for a few seconds
-after any refusal, newcomers are blocked silently rather than asked about, so a
-hijack rotating hosts cannot turn every click into a dialog.
+after any refusal, newcomers are blocked silently rather than asked about.
+
+The dialog is also only *earned* by a real click. An in-page listener, running in an
+isolated content world, records what trusted events actually land on — `isTrusted`
+is set by the engine and cannot be forged, and the isolated world keeps the page
+from reaching the reporting channel to lie (both measured, not assumed). A "link
+activation" with no real click on a link to that destination behind it is a script
+navigation in a costume, and is blocked silently. The net effect: a hijack firing
+off your clicks produces neither a redirect nor a dialog — nothing at all — while a
+link you genuinely clicked still asks once per domain and then remembers.
 
 ### The "blank listings" symptom
 

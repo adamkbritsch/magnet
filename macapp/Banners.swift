@@ -78,6 +78,30 @@ enum RedirectGuard {
         return navigationType == .userLink ? .confirm : .block
     }
 
+    /// Whether a real pointer was recently on a link to this destination.
+    ///
+    /// WebKit reports a script calling click() on an anchor as a link activation --
+    /// there is no way to tell it from a person at the navigation layer. The page's
+    /// own event system CAN tell: `event.isTrusted` is set by the engine and cannot
+    /// be forged, so a capture-phase listener records what real clicks actually
+    /// landed on. A "link activation" with no matching real click behind it is a
+    /// script navigation wearing a costume, and is judged as one.
+    ///
+    /// Matching is by registrable domain rather than exact URL: sites rewrite their
+    /// outbound hrefs in flight (tracking parameters, http to https), and the domain
+    /// is the part that decides anything here anyway.
+    static func clickMatches(destination: URL,
+                             clicks: [(domain: String, at: Date)],
+                             now: Date,
+                             window: TimeInterval = 2.0) -> Bool {
+        guard let host = destination.host else { return false }
+        let dest = registrableDomain(host)
+        return clicks.contains { click in
+            click.domain == dest && now.timeIntervalSince(click.at) <= window
+                && now.timeIntervalSince(click.at) >= 0
+        }
+    }
+
     /// What started the navigation, reduced to what actually matters here.
     enum NavigationKind {
         /// A link the user clicked, or a form they submitted.
@@ -86,6 +110,43 @@ enum RedirectGuard {
         case history
         /// Script, meta refresh, or a server redirect.
         case script
+    }
+}
+
+/// Records what real clicks land on, from inside the page.
+///
+/// Runs in its own content world: the page cannot see the listeners, and -- the part
+/// that matters -- cannot reach the message handler to forge a click. A hostile page
+/// in the shared world could simply call postMessage itself and invent a trusted
+/// click on any URL it liked.
+enum TrustedClicks {
+    static let handlerName = "magnetTrustedClick"
+
+    static func userScript() -> WKUserScript {
+        let source = """
+        (function () {
+          function report(e) {
+            if (!e.isTrusted) return;
+            if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+            var el = (e.composedPath ? e.composedPath()[0] : e.target);
+            var a = el && el.closest ? el.closest('a[href]') : null;
+            if (!a) return;
+            var href = '';
+            try { href = new URL(a.getAttribute('href'), location.href).href; } catch (err) {}
+            if (!href) return;
+            try { window.webkit.messageHandlers.\(handlerName).postMessage(href); } catch (err) {}
+          }
+          var opts = { capture: true, passive: true };
+          document.addEventListener('mousedown', report, opts);
+          document.addEventListener('click', report, opts);
+          document.addEventListener('auxclick', report, opts);
+          document.addEventListener('keydown', report, opts);
+        })();
+        """
+        return WKUserScript(source: source,
+                            injectionTime: .atDocumentStart,
+                            forMainFrameOnly: false,
+                            in: .defaultClient)
     }
 }
 
