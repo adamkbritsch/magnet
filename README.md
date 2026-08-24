@@ -142,25 +142,17 @@ Optionally, FMHY's published list adds mirrors for hundreds of sites in bulk.
 **Only transport failures count.** An HTTP-level rejection — a Cloudflare challenge
 above all — proves the domain is alive, so it never triggers a switch.
 
-### It remembers which route works on which network
+### Everything goes through the NAS
 
-A network that blocks trackers costs you the direct probe's timeout on every launch,
-having already learned the answer the launch before. Magnet records which route worked
-and tries that one first next time — so on a network where the NAS is the only way
-through, the wait is gone.
+There is one route: a forward proxy on the NAS, reached over Tailscale. The direct
+connection was offered once and removed — reaching these sites straight from the Mac
+is what an ordinary browser already does, so the app that only did that added nothing.
+A tunnel that quietly stops being used on a network that happens to permit direct
+traffic is worse than no tunnel, because it looks identical to one that is working.
 
-It is remembered, not trusted: the other route still follows, so a network that
-changes its mind costs one wasted probe and then corrects itself. Pinning a route by
-hand records it too, since choosing one says more than any probe does.
-
-Networks are keyed by the **router's MAC address**, not the Wi-Fi name. macOS will not
-give up the SSID — CoreWLAN, `networksetup`, `ipconfig getsummary` and
-`system_profiler` all answer `<redacted>` without Location Services authorization, and
-a convenience feature is not worth a location prompt. The router identifies the
-network just as well, and where the DHCP lease carries a domain name, that becomes the
-label you see in Settings.
-
-### Why a forward proxy, and not a reverse one
+If the proxy does not answer, nothing loads and the app says so. There is no fallback
+by design: that state is a NAS or tailnet problem to fix, and browsing around it would
+hide the problem while silently dropping the tunnel.
 
 If you route the browser through a proxy to reach a Cloudflare-protected site, it
 **must** be a forward (HTTP `CONNECT`) proxy. Measured:
