@@ -76,10 +76,16 @@ final class WebController: NSObject, ObservableObject {
     /// navigation nobody started is a different thing from one you asked for, and by
     /// the time the response arrives that distinction is no longer visible.
     private var navigationWasClicked = false
-    /// A destination the user has been warned about, and how recently. Clicking the
-    /// same link again inside the window lets it through.
-    private var pendingConfirm: (url: URL, at: Date)?
-    private static let confirmWindow: TimeInterval = 12
+    /// Session verdicts from the leave-site dialog, by registrable domain. In memory
+    /// on purpose: an advert host refused today should not shadow a real site that
+    /// someday lives at the same domain forever.
+    private var approvedDomains: Set<String> = []
+    private var deniedDomains: Set<String> = []
+    /// When a refusal last happened. A hijack that rotates hosts would otherwise put
+    /// up a fresh dialog per click; for a few seconds after a "no", newcomers are
+    /// blocked silently instead of asked about.
+    private var lastDenial: Date?
+    private static let denialQuietPeriod: TimeInterval = 8
     private var observations: [NSKeyValueObservation] = []
     private var toastClear: DispatchWorkItem?
     private var challengeTimeout: DispatchWorkItem?
@@ -181,6 +187,31 @@ final class WebController: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
 
+    /// The leave-site dialog. Modal, Cancel default, and outside the page's reach.
+    private func askToLeave(for url: URL) {
+        guard let host = url.host else { return }
+        let domain = registrableDomain(host)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Leave for \(host)?"
+        alert.informativeText = "The page is sending this window to \(host), which is "
+            + "not one of your sites. Adverts here do this from a click on anything "
+            + "at all. If you did not just click a link to it, cancel."
+        // Cancel first, so Return refuses. A dialog raised by an advert must cost a
+        // deliberate act to approve and nothing to dismiss.
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Go There")
+        if alert.runModal() == .alertSecondButtonReturn {
+            approvedDomains.insert(domain)
+            // A fresh app-initiated load, not a resurrection of the advert's request:
+            // this is now something a person asked for by name.
+            load(url)
+        } else {
+            deniedDomains.insert(domain)
+            lastDenial = Date()
+        }
+    }
+
     fileprivate func handleMagnet(_ url: URL) {
         // Only a magnet claims to carry an info hash. A .torrent link is an ordinary
         // URL that the client fetches itself -- checking it for a hash rejected every
@@ -248,14 +279,10 @@ extension WebController: WKNavigationDelegate {
             // Back and forward are always the user, and a browser that will not go back
             // is worse than any advert.
             if kind != .history {
-                let confirmed = pendingConfirm.flatMap {
-                    Date().timeIntervalSince($0.at) < Self.confirmWindow ? $0.url : nil
-                }
                 switch RedirectGuard.decide(from: webView.url, to: url, navigationType: kind,
                                             chain: chain, known: knownDomains(for: url),
-                                            confirmedTarget: confirmed) {
+                                            approved: approvedDomains, denied: deniedDomains) {
                 case .allow:
-                    pendingConfirm = nil
                     // Only now. Setting the anchor before the decision aimed the chain
                     // at the very URL being judged, so `anchor == destination` always
                     // held and every click was allowed -- which is why a link straight
@@ -273,10 +300,20 @@ extension WebController: WKNavigationDelegate {
                     decisionHandler(.cancel)
                     return
                 case .confirm:
-                    pendingConfirm = (url, Date())
-                    showToast("\(url.host ?? "That site") is not one of yours \u{2014} "
-                              + "click again to go there", isError: false)
+                    // The navigation is dead either way; the dialog decides whether a
+                    // fresh, app-initiated one follows. Nothing the page does can
+                    // answer an NSAlert, which is the entire point -- its predecessor
+                    // ("click the link again") was satisfied by the advert clicking
+                    // for you.
                     decisionHandler(.cancel)
+                    if let last = lastDenial,
+                       Date().timeIntervalSince(last) < Self.denialQuietPeriod {
+                        // A refusal seconds ago answers this too. Hijacks rotate
+                        // hosts; people do not refuse one link and click another
+                        // within a breath.
+                        return
+                    }
+                    askToLeave(for: url)
                     return
                 }
             }
