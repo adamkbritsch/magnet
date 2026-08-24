@@ -189,5 +189,33 @@ check("but a refusal elsewhere changes nothing here",
       decide(newSite, .userLink, chain: onPage("tracker.example"),
              denied: ["someadvertiser.example"]) == .confirm)
 
+print("\nA link activation needs a real click behind it")
+// WebKit calls a scripted click() on an anchor a link activation. The in-page
+// listener records what REAL pointers land on -- isTrusted cannot be forged -- and a
+// claimed activation with no matching click is judged as the script it is.
+let now = Date()
+func clicks(_ entries: (String, TimeInterval)...) -> [(domain: String, at: Date)] {
+    entries.map { ($0.0, now.addingTimeInterval(-$0.1)) }
+}
+check("a real click on a link to the destination makes it believable",
+      RedirectGuard.clickMatches(destination: advert,
+                                 clicks: clicks(("someadvertiser.example", 0.3)), now: now))
+check("with no clicks at all, it is not",
+      !RedirectGuard.clickMatches(destination: advert, clicks: [], now: now))
+// The hijack scenario: the user really clicked, but on something else entirely.
+check("a real click on a DIFFERENT link does not lend its trust",
+      !RedirectGuard.clickMatches(destination: advert,
+                                  clicks: clicks(("tracker.example", 0.2)), now: now))
+check("a stale click has expired",
+      !RedirectGuard.clickMatches(destination: advert,
+                                  clicks: clicks(("someadvertiser.example", 3.5)), now: now))
+check("matching is by domain, not exact URL, so rewritten hrefs still count",
+      RedirectGuard.clickMatches(destination: URL(string: "https://sub.someadvertiser.example/x?y=1")!,
+                                 clicks: clicks(("someadvertiser.example", 0.5)), now: now))
+check("a click stamped in the future is not evidence",
+      !RedirectGuard.clickMatches(destination: advert,
+                                  clicks: [("someadvertiser.example", now.addingTimeInterval(5))],
+                                  now: now))
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

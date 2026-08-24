@@ -86,6 +86,9 @@ final class WebController: NSObject, ObservableObject {
     /// blocked silently instead of asked about.
     private var lastDenial: Date?
     private static let denialQuietPeriod: TimeInterval = 8
+    /// Where real pointers have recently been, reported by the in-page listener.
+    /// What makes a "link activation" believable.
+    private var trustedClicks: [(domain: String, at: Date)] = []
     private var observations: [NSKeyValueObservation] = []
     private var toastClear: DispatchWorkItem?
     private var challengeTimeout: DispatchWorkItem?
@@ -115,7 +118,19 @@ final class WebController: NSObject, ObservableObject {
         // restyling toggle: it is blocking, not decoration.
         config.userContentController.addUserScript(BannerBlocker.userScript())
 
+        // Real-click evidence, from a world the page cannot reach into.
+        config.userContentController.addUserScript(TrustedClicks.userScript())
+        config.userContentController.removeScriptMessageHandler(
+            forName: TrustedClicks.handlerName, contentWorld: .defaultClient)
+        config.userContentController.add(self, contentWorld: .defaultClient,
+                                         name: TrustedClicks.handlerName)
+
         let old = webView
+        // The content controller retains its message handlers, and the handler is
+        // this object, which owns the web view: an uncleared handler is a cycle and
+        // every rebuild would leak the previous web view.
+        old?.configuration.userContentController.removeScriptMessageHandler(
+            forName: TrustedClicks.handlerName, contentWorld: .defaultClient)
         let fresh = WKWebView(frame: .zero, configuration: config)
         fresh.allowsBackForwardNavigationGestures = true
         fresh.allowsMagnification = true
@@ -245,6 +260,20 @@ final class WebController: NSObject, ObservableObject {
     }
 }
 
+extension WebController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == TrustedClicks.handlerName,
+              let href = message.body as? String,
+              let url = URL(string: href),
+              let host = url.host else { return }
+        let now = Date()
+        trustedClicks.append((registrableDomain(host), now))
+        // A few seconds of history is the whole point; more is just a list to scan.
+        trustedClicks.removeAll { now.timeIntervalSince($0.at) > 4 }
+    }
+}
+
 extension WebController: WKNavigationDelegate {
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
@@ -269,11 +298,22 @@ extension WebController: WKNavigationDelegate {
         // ad does on the first click anywhere.
         let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
         if isMainFrame, url.scheme?.lowercased() != "magnet" {
-            let kind: RedirectGuard.NavigationKind
+            var kind: RedirectGuard.NavigationKind
             switch navigationAction.navigationType {
             case .linkActivated, .formSubmitted, .formResubmitted: kind = .userLink
             case .backForward, .reload: kind = .history
             default: kind = .script
+            }
+            // WebKit calls a scripted click() on an anchor a link activation; the
+            // in-page listener knows whether a real pointer was ever on a link to
+            // this destination. No real click, no costume: it is judged as the
+            // script navigation it is, which is blocked silently rather than
+            // dignified with a dialog. This is what stops a hijack from turning
+            // every click into either a redirect or a question.
+            if kind == .userLink,
+               !RedirectGuard.clickMatches(destination: url, clicks: trustedClicks,
+                                           now: Date()) {
+                kind = .script
             }
 
             // Back and forward are always the user, and a browser that will not go back
