@@ -149,14 +149,6 @@ final class AppSettings: ObservableObject {
 
     // MARK: Appearance
 
-    /// Off by default: a browser should not silently repaint every site someone visits.
-    @Published var unifiedStyleEnabled: Bool { didSet { put("style.enabled", unifiedStyleEnabled) } }
-    /// Which palette. `SiteStyle.customThemeID` means "use `siteCSS` verbatim".
-    @Published var styleTheme: String { didSet { put("style.theme", styleTheme) } }
-    /// The custom stylesheet. Empty falls back to a built-in palette, so the editor is
-    /// always pre-filled with something real rather than a blank box.
-    @Published var siteCSS: String { didSet { put("style.css", siteCSS) } }
-
     /// How large sites are drawn. Trackers are dense pages laid out for monitors that
     /// are no longer the ones anyone owns, so the default is a little over life size.
     @Published var siteZoom: Double { didSet { put("site.zoom", siteZoom) } }
@@ -169,14 +161,6 @@ final class AppSettings: ObservableObject {
     var effectiveSiteZoom: Double {
         min(max(siteZoom, AppSettings.siteZoomRange.lowerBound),
             AppSettings.siteZoomRange.upperBound)
-    }
-
-    var effectiveSiteCSS: String {
-        guard styleTheme == SiteStyle.customThemeID else {
-            return SiteStyle.css(for: styleTheme)
-        }
-        let custom = siteCSS.trimmingCharacters(in: .whitespacesAndNewlines)
-        return custom.isEmpty ? SiteStyle.defaultCSS : custom
     }
 
     // MARK: -
@@ -214,9 +198,6 @@ final class AppSettings: ObservableObject {
         let hours = d.integer(forKey: "mirrors.refreshHours")
         mirrorRefreshHours = hours > 0 ? hours : 6
 
-        unifiedStyleEnabled = d.bool(forKey: "style.enabled")
-        styleTheme = d.string(forKey: "style.theme") ?? SiteStyle.themes[0].id
-        siteCSS = d.string(forKey: "style.css") ?? ""
         siteZoom = Config.siteZoom
 
         loading = false
@@ -244,7 +225,7 @@ final class AppSettings: ObservableObject {
                     "nas.host", "nas.share", "nas.user", "archive.root",
                     "archive.localPath", "archive.folders", "downloads.allowedHosts",
                     "mirrors.curated", "mirrors.fmhy.enabled", "mirrors.refreshHours",
-                    "style.enabled", "style.css", "style.theme", "site.zoom"] {
+                    "site.zoom"] {
             d.removeObject(forKey: key)
         }
     }

@@ -16,21 +16,18 @@ run() {
   echo
 }
 
-run bookmarks  "$(dirname "$0")/bookmarks/main.swift"  "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Bookmarks.swift"
-run settings   "$(dirname "$0")/settings/main.swift"   "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
-run wikipedia  "$(dirname "$0")/wikipedia/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift"
-run fmhy       "$(dirname "$0")/fmhy/main.swift"       "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift"
-run categories "$(dirname "$0")/categories/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
-run sitestyle  "$(dirname "$0")/sitestyle/main.swift"  "$SRC/SiteStyle.swift"
-run render     "$(dirname "$0")/render/main.swift"     "$SRC/SiteStyle.swift"
+run bookmarks  "$(dirname "$0")/bookmarks/main.swift"  "$SRC/Settings.swift" "$SRC/Bookmarks.swift"
+run settings   "$(dirname "$0")/settings/main.swift"   "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
+run wikipedia  "$(dirname "$0")/wikipedia/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
+run fmhy       "$(dirname "$0")/fmhy/main.swift"       "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
+run categories "$(dirname "$0")/categories/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
 run banners    "$(dirname "$0")/banners/main.swift"    "$SRC/Domains.swift" "$SRC/Banners.swift"
-run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/Downloads.swift"
-run network    "$(dirname "$0")/network/main.swift"    "$SRC/Domains.swift" "$SRC/Network.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Routes.swift"
-run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
+run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/Downloads.swift"
+run network    "$(dirname "$0")/network/main.swift"    "$SRC/Domains.swift" "$SRC/Network.swift" "$SRC/Settings.swift" "$SRC/Routes.swift"
+run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 if [ "${1:-}" = "--live" ]; then
-  run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Mirrors.swift"
-  run adblock "$(dirname "$0")/adblock/main.swift" "$SRC/SiteStyle.swift"
-  run plugins-live "$(dirname "$0")/pluginslive/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/SiteStyle.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
+  run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
+  run plugins-live "$(dirname "$0")/pluginslive/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 fi
 
 # Nothing that identifies one person's setup may reach the repository. Checked here

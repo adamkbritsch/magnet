@@ -70,7 +70,6 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .qbRecheck)) { _ in
             Task { await routes.resolve(); applyRoute() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .qbRestyle)) { _ in restyle() }
         .onChange(of: routes.proxyNeedsCredentials) { _, needed in
             if needed {
                 web.showToast("The NAS proxy sign-in could not be read, so every site is "
@@ -78,7 +77,6 @@ struct RootView: View {
                               isError: true)
             }
         }
-        .onChange(of: settings.unifiedStyleEnabled) { _, _ in restyle() }
         .onChange(of: settings.siteZoom) { _, _ in web.applyZoom() }
         .modifier(PluginSyncTriggers(bookmarks: bookmarks, settings: settings,
                                      sync: syncPlugins))
@@ -152,13 +150,6 @@ struct RootView: View {
 
     /// Rebuilds the web view so a stylesheet change takes effect, and puts the user
     /// back on the page they were reading rather than bouncing them home.
-    private func restyle() {
-        let current = web.currentURL
-        web.rebuild(proxies: routes.proxyConfigurations(), ruleLists: blocker.ruleLists)
-        generation += 1
-        if let target = current ?? homeURL { web.load(target) }
-    }
-
     private func applyRoute() {
         web.rebuild(proxies: routes.proxyConfigurations(), ruleLists: blocker.ruleLists)
         generation += 1
@@ -1392,13 +1383,10 @@ private struct MirrorsTab: View {
 
 private struct AppearanceTab: View {
     @ObservedObject var settings: AppSettings
-    @State private var edited = false
     /// The field is edited as text and committed on Return, rather than bound straight
     /// to the setting: the page rezooms live, so a half-typed "1" would throw it to the
     /// minimum and back on the way to "105".
     @State private var zoomText = ""
-
-    private var isCustom: Bool { settings.styleTheme == SiteStyle.customThemeID }
 
     private var zoomPercent: String {
         String(Int((settings.effectiveSiteZoom * 100).rounded()))
@@ -1419,164 +1407,55 @@ private struct AppearanceTab: View {
     }
 
     var body: some View {
-        // ScrollView, matching the other tabs. The pane is a fixed height and the Done
-        // bar sits below the TabView, so content that overflows pushes the only way out
-        // of the sheet off the bottom of it.
         ScrollView {
-        VStack(alignment: .leading, spacing: 12) {
-            SettingRow(label: "Site zoom",
-                       hint: "How large pages are drawn. This reflows the layout rather "
-                           + "than magnifying the finished picture, so nothing is cut "
-                           + "off at the right-hand edge. Pinch on any page to go "
-                           + "further still.") {
-                HStack(spacing: 8) {
-                    MonoField(placeholder: "105", text: $zoomText, width: 60)
-                    Text("%").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Stepper("",
-                            onIncrement: { nudgeZoom(0.05) },
-                            onDecrement: { nudgeZoom(-0.05) })
-                        .labelsHidden()
-                    Spacer()
-                    Button("Reset") { settings.siteZoom = AppSettings.defaultSiteZoom }
-                        .font(.system(size: 11))
-                        .disabled(abs(settings.siteZoom - AppSettings.defaultSiteZoom) < 0.005)
-                }
-                .onSubmit { commitZoom() }
-            }
-            .onAppear { zoomText = zoomPercent }
-            .onChange(of: settings.siteZoom) { _, _ in zoomText = zoomPercent }
-
-            Divider()
-
-            Toggle("Restyle sites for consistency", isOn: $settings.unifiedStyleEnabled)
-                .font(.system(size: 12, weight: .medium))
-            Text("One typeface, even spacing, consistent controls, and one colour scheme "
-                 + "across every site. Nothing is hidden and nothing moves, so sites keep "
-                 + "working.")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
-            Text("Theme").font(.system(size: 11, weight: .medium))
-            VStack(spacing: 3) {
-                ForEach(SiteStyle.themes) { theme in
-                    themeRow(id: theme.id, name: theme.name, blurb: theme.blurb,
-                             swatches: theme.swatches)
-                }
-                themeRow(id: SiteStyle.customThemeID, name: "Custom",
-                         blurb: "Your own stylesheet, below.", swatches: [])
-            }
-            .disabled(!settings.unifiedStyleEnabled)
-            .opacity(settings.unifiedStyleEnabled ? 1 : 0.5)
-
-            Divider()
-
-            HStack {
-                Text("Stylesheet").font(.system(size: 11, weight: .medium))
-                Spacer()
-                Text(isCustom ? "custom" : SiteStyle.theme(settings.styleTheme).name.lowercased())
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
-
-            TextEditor(text: Binding(
-                get: { settings.effectiveSiteCSS },
-                set: { newValue in
-                    settings.siteCSS = newValue
-                    // Editing a built-in palette would otherwise change nothing at all,
-                    // which is the worst kind of control: one that looks like it works.
-                    if !isCustom { settings.styleTheme = SiteStyle.customThemeID }
-                    edited = true
-                }
-            ))
-            .font(.system(size: 11, design: .monospaced))
-            .frame(height: 150)
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(Theme.hairline))
-            .disabled(!settings.unifiedStyleEnabled)
-            .opacity(settings.unifiedStyleEnabled ? 1 : 0.5)
-
-            HStack(spacing: 8) {
-                Button("Apply") {
-                    edited = false
-                    NotificationCenter.default.post(name: .qbRestyle, object: nil)
-                }
-                .disabled(!settings.unifiedStyleEnabled)
-                Button("Reset to Default") {
-                    settings.siteCSS = ""
-                    settings.styleTheme = SiteStyle.themes[0].id
-                    edited = false
-                    NotificationCenter.default.post(name: .qbRestyle, object: nil)
-                }
-                .disabled(settings.siteCSS.isEmpty && !isCustom)
-                Spacer()
-                if edited {
-                    Text("Apply to see the change")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            }
-
-            Text("Darkening a page can leave a sticky header unstuck, and artwork with a "
-                 + "baked-in background may still look wrong. Use a per-site exception at "
-                 + "the bottom of the stylesheet for anything a theme does not suit.")
-                .font(.system(size: 10)).foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(18)
-        }
-    }
-
-    @ViewBuilder
-    private func themeRow(id: String, name: String, blurb: String, swatches: [String]) -> some View {
-        let selected = settings.styleTheme == id
-        Button {
-            settings.styleTheme = id
-            NotificationCenter.default.post(name: .qbRestyle, object: nil)
-        } label: {
-            HStack(spacing: 9) {
-                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(name).font(.system(size: 11.5, weight: .medium))
-                    Text(blurb).font(.system(size: 9.5)).foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                HStack(spacing: 3) {
-                    ForEach(swatches, id: \.self) { hex in
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(Color(hex: hex))
-                            .frame(width: 20, height: 14)
-                            .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                .strokeBorder(Theme.hairline))
+            VStack(alignment: .leading, spacing: 12) {
+                SettingRow(label: "Site zoom",
+                           hint: "How large pages are drawn. This reflows the layout rather "
+                               + "than magnifying the finished picture, so nothing is cut "
+                               + "off at the right-hand edge. Pinch on any page to go "
+                               + "further still.") {
+                    HStack(spacing: 8) {
+                        MonoField(placeholder: "105", text: $zoomText, width: 60)
+                        Text("%").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Stepper("",
+                                onIncrement: { nudgeZoom(0.05) },
+                                onDecrement: { nudgeZoom(-0.05) })
+                            .labelsHidden()
+                        Spacer()
+                        Button("Reset") { settings.siteZoom = AppSettings.defaultSiteZoom }
+                            .font(.system(size: 11))
+                            .disabled(abs(settings.siteZoom - AppSettings.defaultSiteZoom) < 0.005)
                     }
+                    .onSubmit { commitZoom() }
                 }
+                .onAppear { zoomText = zoomPercent }
+                .onChange(of: settings.siteZoom) { _, _ in zoomText = zoomPercent }
+
+                Divider()
+
+                // Sites are shown as their authors built them.
+                //
+                // There was a restyling engine here that imposed one theme across every
+                // site: one typeface, one palette, backgrounds stripped, logos replaced
+                // with text. It looked good and it could not be reconciled with the
+                // content blocker. Both want authority over the same elements -- the
+                // blocker hides things, the restyler repaints everything it can reach --
+                // and adverts kept surfacing through the repaint. Blocking wins; it is
+                // the one of the two that matters.
+                Text("Sites keep their own appearance.")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Pages are shown as their authors built them. An earlier version "
+                     + "imposed a single theme across every site, which fought with the "
+                     + "content blocker over the same elements and let adverts through. "
+                     + "Blocking is the more important of the two.")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(selected ? Theme.pillFill : Color.clear))
-            .contentShape(Rectangle())
+            .padding(18)
         }
-        .buttonStyle(.plain)
     }
 }
 
-private extension Color {
-    /// Swatches come from the stylesheet, so they are hex strings rather than assets.
-    init(hex: String) {
-        var s = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
-        let v = UInt64(s, radix: 16) ?? 0
-        self = Color(.sRGB,
-                     red: Double((v >> 16) & 0xff) / 255,
-                     green: Double((v >> 8) & 0xff) / 255,
-                     blue: Double(v & 0xff) / 255,
-                     opacity: 1)
-    }
-}
-
-// MARK: Blocking
 
 private struct BlockingTab: View {
     @ObservedObject var blocker: ContentBlocker

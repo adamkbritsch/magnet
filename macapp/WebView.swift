@@ -109,13 +109,6 @@ final class WebController: NSObject, ObservableObject {
         // restyling toggle: it is blocking, not decoration.
         config.userContentController.addUserScript(BannerBlocker.userScript())
 
-        // One stylesheet across every site, when asked for. Injected here rather than
-        // per-navigation so it is present before the first paint.
-        if AppSettings.shared.unifiedStyleEnabled,
-           let style = SiteStyle.userScript(css: AppSettings.shared.effectiveSiteCSS) {
-            config.userContentController.addUserScript(style)
-        }
-
         let old = webView
         let fresh = WKWebView(frame: .zero, configuration: config)
         fresh.allowsBackForwardNavigationGestures = true

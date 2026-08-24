@@ -245,18 +245,16 @@ group the bar. Point the archive root at a folder nothing else manages: if it is
 somewhere a media pipeline watches, captured files get imported and renamed out from
 under you.
 
-### Every site wears the same theme
+### Sites keep their own appearance
 
-Five themes — Slate, Midnight, Carbon, Forest and Paper (light) — plus your own
-stylesheet, which is editable in Settings.
+There was a restyling engine here: five themes, one typeface and palette across every
+site, backgrounds stripped, logos replaced with text. It is gone.
 
-The restyling is uniform but not careless. It never overrides an inset a site
-reserves for its own artwork: a search field's `padding-left` clears a magnifier
-icon, and a listing cell's clears its category icon, so replacing either drops the
-icon onto the text. Icon fonts survive because the typeface is set on containers
-only, never on `*` — a declared value beats an inherited one, so a `*` selector
-turns every icon on the page into a stray letter. A site's logo is replaced with its
-name, set to the width the image occupied.
+It could not be reconciled with the content blocker. Both want authority over the same
+elements — the blocker hides things, the restyler repaints everything it can reach —
+and adverts kept surfacing through the repaint. Two systems rewriting the same DOM with
+opposite intentions is not a bug to be found and fixed; it is the arrangement itself.
+Blocking is the one of the two that matters, so restyling went.
 
 ### Blocking
 
