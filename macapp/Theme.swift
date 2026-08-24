@@ -110,5 +110,4 @@ extension Notification.Name {
     static let qbZoomReset = Notification.Name("qb.zoomReset")
     static let qbSettings = Notification.Name("qb.settings")
     static let qbRecheck = Notification.Name("qb.recheck")
-    static let qbRestyle = Notification.Name("qb.restyle")
 }
