@@ -204,6 +204,19 @@ private struct TopBar: View {
     @Binding var showSettings: Bool
     let onHome: () -> Void
 
+    /// Hands the page to the default browser, which reaches it directly rather than
+    /// through the proxy. Falls back to the home site when nothing has loaded yet --
+    /// which is exactly the case where the proxy is down and this button is the only
+    /// thing on screen that still works.
+    private func openExternally() {
+        guard let url = web.currentURL
+            ?? AppSettings.shared.home.map({ MirrorDirectory.shared.resolve($0) })
+        else { return }
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https"
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .bottom) {
@@ -255,6 +268,14 @@ private struct TopBar: View {
 
                     ShieldPill(blocker: blocker)
                     RoutePill(routes: routes, showSettings: $showSettings)
+                    // The way out. Everything here goes through the NAS, so when a
+                    // site wants something this app deliberately will not do -- a
+                    // sign-in, a payment page, a download it refuses -- the answer is
+                    // a real browser, which reaches it directly and is built for it.
+                    ChromeButton(symbol: "arrow.up.forward.app",
+                                 help: "Open this page in your browser") {
+                        openExternally()
+                    }
                     ChromeButton(symbol: web.isLoading ? "xmark" : "arrow.clockwise",
                                  help: web.isLoading ? "Stop" : "Reload") {
                         web.isLoading ? web.stop() : web.reload()

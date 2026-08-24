@@ -154,6 +154,12 @@ If the proxy does not answer, nothing loads and the app says so. There is no fal
 by design: that state is a NAS or tailnet problem to fix, and browsing around it would
 hide the problem while silently dropping the tunnel.
 
+Next to the route indicator is **Open in Browser**, which hands the current page to
+your default browser — reached directly, outside the tunnel. It is the deliberate way
+out for anything this app will not do: a sign-in, a payment page, a download it
+refuses. When the proxy is down it falls back to the home site, since that is exactly
+when it is the only control on screen that still works.
+
 If you route the browser through a proxy to reach a Cloudflare-protected site, it
 **must** be a forward (HTTP `CONNECT`) proxy. Measured:
 
