@@ -111,9 +111,10 @@ let appChain = RedirectGuard.Chain(appInitiated: true, anchorDomain: "tracker.ex
 func decide(_ dest: URL,
             _ kind: RedirectGuard.NavigationKind,
             chain: RedirectGuard.Chain,
-            confirmed: URL? = nil) -> RedirectGuard.Decision {
+            approved: Set<String> = [],
+            denied: Set<String> = []) -> RedirectGuard.Decision {
     RedirectGuard.decide(from: here, to: dest, navigationType: kind, chain: chain,
-                         known: knownSites, confirmedTarget: confirmed)
+                         known: knownSites, approved: approved, denied: denied)
 }
 
 // The case two block-list heuristics failed to catch: the click is same-domain and
@@ -150,16 +151,43 @@ check("a magnet link is left alone", decide(URL(string: "magnet:?xt=urn:btih:a")
                                             chain: onPage("tracker.example")) == .allow)
 
 print("\nA deliberate outbound link is possible, just not automatic")
+let newSite = URL(string: "https://somewhere-new.example/")!
 check("clicking through to an unknown site asks first",
-      decide(URL(string: "https://somewhere-new.example/")!, .userLink,
-             chain: onPage("tracker.example")) == .confirm)
-check("clicking the same link again goes there",
-      decide(URL(string: "https://somewhere-new.example/")!, .userLink,
-             chain: onPage("tracker.example"),
-             confirmed: URL(string: "https://somewhere-new.example/")!) == .allow)
-check("confirming one destination does not admit a different one",
+      decide(newSite, .userLink, chain: onPage("tracker.example")) == .confirm)
+check("a dialog approval admits the whole domain",
+      decide(newSite, .userLink, chain: onPage("tracker.example"),
+             approved: ["somewhere-new.example"]) == .allow)
+check("approving one domain does not admit a different one",
       decide(advert, .script, chain: onPage("tracker.example"),
-             confirmed: URL(string: "https://somewhere-new.example/")!) == .block)
+             approved: ["somewhere-new.example"]) == .block)
+
+print("\nTHE BYPASS: the page must not be able to approve itself")
+// In the wild, the advert fired twice. The first attempt reported as a link
+// activation -- a script calling click() on an anchor it just made is one, WebKit
+// does not distinguish -- and armed the click-again confirmation. The second
+// attempt, pure script to the same URL seconds later, matched it and was allowed.
+// The old suite checked that a confirmation did not admit a DIFFERENT URL, and
+// never that a script to the SAME one was refused. Approval now exists only as a
+// per-domain verdict handed out by a dialog, so at this layer the second attempt
+// is judged like the first:
+check("a script navigation to a just-confirmed URL is still blocked",
+      decide(newSite, .script, chain: onPage("tracker.example")) == .block)
+check("and a repeated link activation still only asks",
+      decide(newSite, .userLink, chain: onPage("tracker.example")) == .confirm)
+
+print("\nA refusal holds for the session")
+check("a denied domain is blocked even from a link activation",
+      decide(advert, .userLink, chain: onPage("tracker.example"),
+             denied: ["someadvertiser.example"]) == .block)
+check("denial is not the toast-and-ask outcome",
+      decide(advert, .userLink, chain: onPage("tracker.example"),
+             denied: ["someadvertiser.example"]) != .confirm)
+check("refusal outranks an aimed chain",
+      decide(advert, .script, chain: onPage("someadvertiser.example"),
+             denied: ["someadvertiser.example"]) == .block)
+check("but a refusal elsewhere changes nothing here",
+      decide(newSite, .userLink, chain: onPage("tracker.example"),
+             denied: ["someadvertiser.example"]) == .confirm)
 
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

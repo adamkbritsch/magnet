@@ -12,16 +12,23 @@ import WebKit
 /// set of tricks is not.
 ///
 /// The cost is real and deliberate: a genuine outbound link is stopped too, the first
-/// time. Clicking it again inside the confirmation window lets it through, so nothing
-/// becomes impossible -- only automatic.
+/// time. A dialog asks; a host approved there is not asked about again this session.
+///
+/// Why a dialog, and not click-it-again: the click-again design was bypassed in the
+/// wild. "Clicked" is not evidence of a person -- a script calling click() on an
+/// anchor it just made reports as a link activation, indistinguishable from a real
+/// one -- and the confirmation state it armed was honoured for ANY later navigation
+/// to the same URL. So an advert fired twice and confirmed itself. A modal dialog is
+/// the one surface a page cannot click.
 enum RedirectGuard {
     enum Decision: Equatable {
-        /// Somewhere you know, or somewhere you asked for.
+        /// Somewhere you know, or somewhere you approved.
         case allow
-        /// A page moving itself somewhere unknown. Never reachable by clicking again,
-        /// because no click was involved.
+        /// Leaving for somewhere unknown with no person behind it, or somewhere
+        /// already refused this session.
         case block
-        /// You clicked a link that leaves for somewhere unknown. Click it again to go.
+        /// A link activation leaving for somewhere unknown: put the question to a
+        /// person, in a dialog the page cannot answer.
         case confirm
     }
 
@@ -35,13 +42,17 @@ enum RedirectGuard {
 
     /// - Parameters:
     ///   - known: registrable domains of the sites in the bar, plus their mirrors.
-    ///   - confirmedTarget: a destination the user has just been warned about.
+    ///   - approved: domains a person approved in the dialog this session.
+    ///   - denied: domains a person refused in the dialog this session. Blocked
+    ///     silently from then on, so a hijack firing on every click does not turn
+    ///     into a dialog on every click.
     static func decide(from current: URL?,
                        to destination: URL,
                        navigationType: NavigationKind,
                        chain: Chain,
                        known: Set<String>,
-                       confirmedTarget: URL?) -> Decision {
+                       approved: Set<String>,
+                       denied: Set<String>) -> Decision {
         guard let scheme = destination.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               let destHost = destination.host else { return .allow }
@@ -49,17 +60,21 @@ enum RedirectGuard {
 
         // The app asked for it, and so did every redirect it triggers.
         if chain.appInitiated { return .allow }
+        // Somewhere already refused. Refusal outranks everything a page can arrange,
+        // because everything below this line is drawn from what pages do.
+        if denied.contains(dest) { return .block }
         // Where the chain was aimed, including that site's own redirects.
         if let anchor = chain.anchorDomain, anchor == dest { return .allow }
         // Still on the site being read.
         if let current, let host = current.host, registrableDomain(host) == dest { return .allow }
         // A site in the bar, or one of its mirrors: somewhere you already go.
         if known.contains(dest) { return .allow }
-        // Already warned about this exact destination, and asked for again.
-        if let confirmedTarget, confirmedTarget == destination { return .allow }
+        // Somewhere a person already said yes to, in the dialog.
+        if approved.contains(dest) { return .allow }
 
-        // Leaving for somewhere unknown. A click can be confirmed; a page moving itself
-        // cannot, because there is no intent behind it to confirm.
+        // Leaving for somewhere unknown. A link activation earns the question -- even
+        // a scripted one, since the dialog is where the person answers -- and a page
+        // moving itself outright earns nothing.
         return navigationType == .userLink ? .confirm : .block
     }
 

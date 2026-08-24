@@ -272,6 +272,17 @@ least 300px wide with an aspect ratio of 3 or more, pointing off-domain. Both
 conditions are required, which is what keeps a poster and a site's own announcement
 visible.
 
+Redirects are an allow-list over the window itself: a navigation leaving your sites
+is blocked silently unless a person approves it — **in a dialog**, per domain, per
+session. The earlier design ("click the link again to go there") was bypassed in the
+wild, and the mechanics are worth recording: a script calling `click()` on an anchor
+it just made reports as a link activation, indistinguishable from a real one, and the
+armed confirmation was honoured for *any* later navigation to the same URL — so the
+advert fired twice and confirmed itself. A modal dialog is the one surface a page
+cannot click. Refusing a host silences it for the session, and for a few seconds
+after any refusal, newcomers are blocked silently rather than asked about, so a
+hijack rotating hosts cannot turn every click into a dialog.
+
 ### The "blank listings" symptom
 
 During Cloudflare's ~6s check, a site serves its own shell with zero rows, which
