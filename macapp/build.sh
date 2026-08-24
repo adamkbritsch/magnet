@@ -227,6 +227,9 @@ echo "==> Built: $APP"
 echo "    filter lists: $(ls "$APP/Contents/Resources"/blocklist-*.json 2>/dev/null | wc -l | tr -d ' ')"
 
 if [[ "${1:-}" == "--install" ]]; then
+  # Checked BEFORE the bundle is replaced, while the old process is still identifiable.
+  WAS_RUNNING=0
+  pgrep -f "Magnet.app/Contents/MacOS/Magnet" >/dev/null 2>&1 && WAS_RUNNING=1
   echo "==> Installing to $INSTALLED"
   rm -rf "$INSTALLED"
   ditto "$APP" "$INSTALLED"
@@ -241,5 +244,36 @@ if [[ "${1:-}" == "--install" ]]; then
   "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
   rm -rf "$APP"
   "$LSREGISTER" -f "$INSTALLED" >/dev/null 2>&1 || true
+
+  # Restart it if it was running.
+  #
+  # A running Mach-O keeps the inode it opened, so installing over a live process
+  # changes nothing until it is restarted -- and "relaunch to pick it up" has now
+  # failed three times in a row, once for hours, while a fix sat on disk unused and
+  # the bug it fixed kept happening. An installer that says "Installed" while the old
+  # code is still running is lying by omission.
+  if [[ $WAS_RUNNING -eq 1 ]]; then
+    echo "==> Restarting the running copy"
+    osascript -e 'tell application id "'"$BUNDLE_ID"'" to quit' >/dev/null 2>&1 || true
+    for _ in $(seq 1 25); do
+      pgrep -f "Magnet.app/Contents/MacOS/Magnet" >/dev/null 2>&1 || break
+      sleep 0.2
+    done
+    pgrep -f "Magnet.app/Contents/MacOS/Magnet" >/dev/null 2>&1 \
+      && pkill -f "Magnet.app/Contents/MacOS/Magnet" >/dev/null 2>&1 || true
+    # LaunchServices can still be tearing the old process down, and `open` answers
+    # -600 if it arrives during that. Retry rather than leave nothing running, which
+    # is a worse outcome than the stale copy this is here to replace.
+    for _ in $(seq 1 10); do
+      open "$INSTALLED" 2>/dev/null && break
+      sleep 0.5
+    done
+    sleep 1
+    if pgrep -f "Magnet.app/Contents/MacOS/Magnet" >/dev/null 2>&1; then
+      echo "    restarted"
+    else
+      echo "    COULD NOT RESTART -- open it yourself, the old copy is gone"
+    fi
+  fi
   echo "==> Installed (build output removed, so only one bundle can be launched)"
 fi
