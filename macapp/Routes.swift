@@ -3,41 +3,25 @@ import Network
 import Security
 import WebKit
 
-/// How the web view reaches tracker sites.
+/// There is one route: the NAS forward proxy.
+///
+/// A direct connection was offered once and removed. Reaching these sites straight
+/// from the Mac is what an ordinary browser already does, so the app that only did
+/// that added nothing; what it adds is the tunnel, and a tunnel that silently stops
+/// being used on a network that happens to permit direct traffic is worse than no
+/// tunnel at all, because it looks identical.
+///
+/// This has to be a *forward* proxy. A reverse proxy cannot serve a Cloudflare-
+/// challenged site: the challenge never completes (verified -- it sat on "Just a
+/// moment..." indefinitely). CONNECT passes raw TLS through to the origin, so
+/// Cloudflare sees an ordinary browser and the challenge solves in about six seconds.
 enum X1337Route: String, CaseIterable, Identifiable {
-    /// Straight out of this Mac. Fastest, and what works at home.
-    case direct
-    /// Tunnelled through the NAS with HTTP CONNECT over the tailnet.
-    ///
-    /// This has to be a *forward* proxy. A reverse proxy cannot serve a
-    /// Cloudflare-challenged site: the challenge never completes (verified — it
-    /// sat on "Just a moment..." indefinitely). CONNECT passes raw TLS through to
-    /// the origin, so Cloudflare sees an ordinary browser and the challenge solves
-    /// in about six seconds, same as direct.
     case viaNAS
 
     var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .direct: return "Direct"
-        case .viaNAS: return "Via NAS"
-        }
-    }
-
-    var blurb: String {
-        switch self {
-        case .direct: return "Straight from this Mac. Fastest."
-        case .viaNAS: return "Tunnelled through the NAS over Tailscale, for networks that block trackers."
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .direct: return "arrow.up.right"
-        case .viaNAS: return "lock.shield"
-        }
-    }
+    var label: String { "Via NAS" }
+    var blurb: String { "Tunnelled through the NAS over Tailscale." }
+    var symbol: String { "lock.shield" }
 }
 
 /// The NAS forward-proxy password, kept in the Keychain rather than in the binary.
@@ -126,15 +110,9 @@ final class RouteStore: ObservableObject {
     }
 
     @Published private(set) var status: Status = .probing
-    @Published private(set) var active: X1337Route = .direct
+    @Published private(set) var active: X1337Route = .viaNAS
     @Published var proxyHost: String
     @Published var proxyPort: UInt16
-    /// nil = choose automatically; set = user pinned it.
-    @Published private(set) var pinned: X1337Route?
-    /// The network this Mac is on, once a probe has looked.
-    @Published private(set) var network: NetworkIdentity.Network?
-    /// What worked here last time, if this network has been seen before.
-    @Published private(set) var learned: X1337Route?
 
     private let defaults = UserDefaults.standard
     private let session: URLSession
@@ -143,9 +121,6 @@ final class RouteStore: ObservableObject {
         proxyHost = defaults.string(forKey: "proxy.host") ?? ""
         let p = defaults.integer(forKey: "proxy.port")
         proxyPort = p > 0 ? UInt16(p) : 8888
-        if let raw = defaults.string(forKey: "route.pinned") {
-            pinned = X1337Route(rawValue: raw)
-        }
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 5
         cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -157,94 +132,6 @@ final class RouteStore: ObservableObject {
         proxyPort = port
         defaults.set(proxyHost, forKey: "proxy.host")
         defaults.set(Int(port), forKey: "proxy.port")
-    }
-
-    func pin(_ route: X1337Route?) {
-        pinned = route
-        if let route { defaults.set(route.rawValue, forKey: "route.pinned") }
-        else { defaults.removeObject(forKey: "route.pinned") }
-        // Choosing a route by hand says more about this network than any probe does.
-        if let route, let key = network?.key { remember(route, for: key) }
-    }
-
-    // MARK: - What worked on this network last time
-
-    /// Networks are remembered by their router, and the value is which route worked.
-    ///
-    /// The point is the wasted probe. On a network that blocks trackers the direct
-    /// check has to time out before the NAS is tried, and it does that on every launch,
-    /// having already learned the answer the launch before. Remembering turns five
-    /// seconds of staring at a blank window into none.
-    private static let memoryKey = "route.byNetwork"
-
-    private var memory: [String: String] {
-        get { (defaults.dictionary(forKey: Self.memoryKey) as? [String: String]) ?? [:] }
-        set { defaults.set(newValue, forKey: Self.memoryKey) }
-    }
-
-    func remembered(for key: String) -> X1337Route? {
-        memory[key].flatMap(X1337Route.init(rawValue:))
-    }
-
-    private func remember(_ route: X1337Route, for key: String) {
-        var m = memory
-        guard m[key] != route.rawValue else { return }
-        m[key] = route.rawValue
-        memory = m
-        learned = route
-    }
-
-    /// Forgets this network only, so the next probe starts from nothing.
-    func forgetCurrentNetwork() {
-        guard let key = network?.key else { return }
-        var m = memory
-        m.removeValue(forKey: key)
-        memory = m
-        learned = nil
-    }
-
-    func forgetAllNetworks() {
-        defaults.removeObject(forKey: Self.memoryKey)
-        learned = nil
-    }
-
-    var knownNetworkCount: Int { memory.count }
-
-    /// Which routes to try, in order.
-    ///
-    /// Pure, and separate from the probing, because the ordering is the whole feature
-    /// and the probing needs a network to test against. A remembered route is tried
-    /// first but never trusted: the other one still follows it, so a network that has
-    /// changed its mind costs one wasted probe and then corrects itself.
-    nonisolated static func probeOrder(pinned: X1337Route?,
-                                       remembered: X1337Route?) -> [X1337Route] {
-        if let pinned { return [pinned] }
-        guard let remembered else { return [.direct, .viaNAS] }
-        return [remembered] + X1337Route.allCases.filter { $0 != remembered }
-    }
-
-    /// The domain the app actually opens. Probing a fixed address would report the
-    /// app offline in exactly the case a mirror exists to cover -- that domain being
-    /// the one that died. Nil until a home site is configured.
-    var homeProbeURL: URL?
-
-    /// Reachability, not success. A Cloudflare challenge is a 403 and still means
-    /// the site is reachable — only a transport failure means the network is
-    /// blocking us.
-    private func directReachable() async -> Bool {
-        // Nothing to probe until a home site is configured.
-        guard let url = homeProbeURL else { return false }
-        var req = URLRequest(url: url)
-        req.httpMethod = "HEAD"
-        req.timeoutInterval = 5
-        do {
-            _ = try await session.data(for: req)
-            return true
-        } catch {
-            let ns = error as NSError
-            // A response that merely errored at the HTTP layer still proves reach.
-            return ns.domain != NSURLErrorDomain
-        }
     }
 
     /// Guards the one-shot resume. The state handler and the timeout fire on
@@ -289,33 +176,20 @@ final class RouteStore: ObservableObject {
 
     func resolve() async {
         status = .probing
-        // Off the main actor: this shells out, and the window is already on screen.
-        network = await Task.detached { NetworkIdentity.current() }.value
-        let key = network?.key
-        learned = key.flatMap { remembered(for: $0) }
-        let order = Self.probeOrder(pinned: pinned, remembered: learned)
-
-        for route in order {
-            let ok = route == .direct ? await directReachable() : await nasReachable()
-            if ok {
-                active = route
-                status = .live(route)
-                if let key { remember(route, for: key) }
-                return
-            }
+        guard !proxyHost.trimmingCharacters(in: .whitespaces).isEmpty else {
+            status = .offline("No forward proxy is configured. Open Settings \u{2192} "
+                              + "Connection and set the NAS address.")
+            return
         }
-        // A pinned route that is down should still fall back rather than dead-end.
-        if let pinned {
-            let other: X1337Route = pinned == .direct ? .viaNAS : .direct
-            let ok = other == .direct ? await directReachable() : await nasReachable()
-            if ok {
-                active = other
-                status = .live(other)
-                if let key { remember(other, for: key) }
-                return
-            }
+        if await nasReachable() {
+            active = .viaNAS
+            status = .live(.viaNAS)
+            return
         }
-        status = .offline("Neither a direct connection nor the NAS could be reached.")
+        // No fallback by design. Failing here is a NAS or tailnet problem to fix,
+        // and quietly browsing around it would hide that while dropping the tunnel.
+        status = .offline("The NAS proxy at \(proxyHost):\(proxyPort) is not answering. "
+                          + "Sites load only through it.")
     }
 
     /// The proxy settings to hand WKWebsiteDataStore for the active route.
@@ -327,7 +201,7 @@ final class RouteStore: ObservableObject {
     @Published private(set) var proxyNeedsCredentials = false
 
     func proxyConfigurations() -> [ProxyConfiguration] {
-        guard active == .viaNAS, !proxyHost.trimmingCharacters(in: .whitespaces).isEmpty
+        guard !proxyHost.trimmingCharacters(in: .whitespaces).isEmpty
         else { proxyNeedsCredentials = false; return [] }
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(proxyHost),

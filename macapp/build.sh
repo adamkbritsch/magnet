@@ -98,7 +98,7 @@ fi
 
 echo "==> Compiling"
 "$SWIFTC" -target arm64-apple-macosx14.0 -O "${SDKARGS[@]}" \
-  "$SRC"/main.swift "$SRC"/Theme.swift "$SRC"/Domains.swift "$SRC"/Network.swift "$SRC"/Settings.swift "$SRC"/Routes.swift \
+  "$SRC"/main.swift "$SRC"/Theme.swift "$SRC"/Domains.swift "$SRC"/Settings.swift "$SRC"/Routes.swift \
   "$SRC"/Bookmarks.swift "$SRC"/Magnet.swift "$SRC"/SearchPlugins.swift "$SRC"/Mirrors.swift "$SRC"/Categories.swift "$SRC"/Banners.swift \
   "$SRC"/Downloads.swift \
   "$SRC"/WebView.swift "$SRC"/RootView.swift \

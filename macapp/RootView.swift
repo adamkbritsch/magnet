@@ -134,16 +134,15 @@ struct RootView: View {
         .animation(.easeInOut(duration: 0.2), value: web.toast)
     }
 
-    /// Settles on a domain before probing routes, so a dead home domain reads as
-    /// "use a mirror" rather than "you are offline".
+    /// Settles on a domain before probing, so a dead home domain reads as "use a
+    /// mirror" rather than "you are offline". The probe itself only asks whether the
+    /// proxy answers; which site is being opened no longer enters into it.
     private func openHome() async {
         guard let configured = settings.home else {
             homeURL = nil
-            routes.homeProbeURL = nil
             return
         }
         homeURL = await MirrorDirectory.shared.preferredURL(for: configured)
-        routes.homeProbeURL = homeURL
         await routes.resolve()
         applyRoute()
     }
@@ -590,26 +589,6 @@ private struct RoutePill: View {
 
     var body: some View {
         Menu {
-            Section("Route") {
-                ForEach(X1337Route.allCases) { route in
-                    Button {
-                        routes.pin(route)
-                        NotificationCenter.default.post(name: .qbRecheck, object: nil)
-                    } label: {
-                        if routes.active == route {
-                            Label(route.label, systemImage: "checkmark")
-                        } else {
-                            Text(route.label)
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button("Choose Automatically") {
-                routes.pin(nil)
-                NotificationCenter.default.post(name: .qbRecheck, object: nil)
-            }
-            .disabled(routes.pinned == nil)
             Button("Check Again") {
                 NotificationCenter.default.post(name: .qbRecheck, object: nil)
             }
@@ -933,36 +912,16 @@ private struct ConnectionTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                SettingRow(label: "Route", hint: routeHint) {
-                    Picker("", selection: Binding(
-                        get: { routes.pinned },
-                        set: { routes.pin($0); NotificationCenter.default.post(name: .qbRecheck, object: nil) }
-                    )) {
-                        Text("Choose automatically").tag(X1337Route?.none)
-                        ForEach(X1337Route.allCases) { route in
-                            Text(route.label).tag(X1337Route?.some(route))
-                        }
-                    }
-                    .labelsHidden().pickerStyle(.radioGroup)
-                }
-
-                SettingRow(label: "This network", hint: networkHint) {
-                    HStack(spacing: 8) {
-                        Text(routes.network?.label ?? "Not identified")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(routes.network == nil ? .tertiary : .secondary)
-                        Spacer()
-                        if routes.learned != nil {
-                            Button("Forget") {
-                                routes.forgetCurrentNetwork()
-                                NotificationCenter.default.post(name: .qbRecheck, object: nil)
-                            }
-                            .font(.system(size: 11))
-                        }
-                        if routes.knownNetworkCount > 1 {
-                            Button("Forget All") { routes.forgetAllNetworks() }
-                                .font(.system(size: 11))
-                        }
+                SettingRow(label: "Route",
+                           hint: "Every site loads through the NAS forward proxy. There "
+                               + "is no direct option: reaching these sites straight from "
+                               + "this Mac is what an ordinary browser already does, and a "
+                               + "tunnel that quietly stops being used on a permissive "
+                               + "network looks exactly like one that is working.") {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.shield")
+                            .foregroundStyle(.secondary)
+                        Text(routeHint).font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 }
 
@@ -1006,24 +965,12 @@ private struct ConnectionTab: View {
         }
     }
 
-    /// Says what was learned and what it is used for, or why nothing was learned.
-    private var networkHint: String {
-        guard routes.network != nil else {
-            return "The router could not be identified, so nothing is remembered here "
-                + "and both routes are tried in order every time."
-        }
-        let base = "Networks are remembered by their router rather than by Wi-Fi name, "
-            + "which macOS will not hand over without Location access."
-        guard let learned = routes.learned else {
-            return "Nothing learned here yet. " + base
-        }
-        return "\(learned.label) worked here last time, so it is tried first — which "
-            + "skips the wait for a route that is blocked on this network. It is not "
-            + "trusted blindly: the other one still follows if it fails. " + base
-    }
-
     private var routeHint: String {
-        "Direct is fastest. Via NAS tunnels through your own proxy for networks that block trackers."
+        switch routes.status {
+        case .probing: return "Checking the proxy\u{2026}"
+        case .offline: return "Not reachable — nothing will load"
+        case .live: return "Tunnelled through the NAS over Tailscale"
+        }
     }
 
     private var statusText: String {
