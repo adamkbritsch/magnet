@@ -47,7 +47,28 @@ final class ContentBlocker: ObservableObject {
         }
         ruleLists = loaded
         ruleCount = total
-        status = loaded.isEmpty ? "Filters failed to load" : "\(loaded.count) filter lists active"
+        if loaded.isEmpty {
+            status = "Filters failed to load"
+        } else {
+            var text = "\(loaded.count) filter lists active"
+            if loaded.count < files.count {
+                // A list that fails to compile vanishes without this; try? eats it.
+                text += " (\(files.count - loaded.count) failed to compile)"
+            }
+            // Age is the failure nobody sees: the shield says Blocking either way,
+            // while ad hosts that appeared since generation walk straight through.
+            if let first = files.first {
+                let url = resources.appendingPathComponent(first)
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   let modified = attrs[.modificationDate] as? Date {
+                    let days = Int(Date().timeIntervalSince(modified) / 86_400)
+                    if days >= 10 {
+                        text += " — built \(days) days ago; rebuild the app to refresh them"
+                    }
+                }
+            }
+            status = text
+        }
     }
 }
 
