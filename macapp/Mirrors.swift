@@ -284,10 +284,10 @@ enum Reachability {
         var req = URLRequest(url: url)
         req.httpMethod = "HEAD"
         req.timeoutInterval = 6
-        let config = URLSessionConfiguration.ephemeral
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
         do {
-            _ = try await URLSession(configuration: config).data(for: req)
+            // Through the proxy, because that is the only way the app reaches sites.
+            // Probing directly asked a question about a network nobody browses on.
+            _ = try await ProxyRoute.session().data(for: req)
             return true
         } catch {
             return (error as NSError).domain != NSURLErrorDomain
@@ -304,7 +304,7 @@ enum FMHYList {
     static func fetch() async throws -> [String: MirrorSet] {
         var req = URLRequest(url: endpoint)
         req.timeoutInterval = 30
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let (data, _) = try await ProxyRoute.session(timeout: 20).data(for: req)
         guard let text = String(data: data, encoding: .utf8) else { throw MirrorError.badResponse }
         return parse(text)
     }
@@ -422,7 +422,7 @@ enum WikipediaInfobox {
         req.setValue("Magnet/1.0 (macOS; mirror list updater)", forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 15
 
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let (data, _) = try await ProxyRoute.session(timeout: 20).data(for: req)
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let query = root["query"] as? [String: Any],
               let pages = query["pages"] as? [[String: Any]],

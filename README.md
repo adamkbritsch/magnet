@@ -192,6 +192,15 @@ published list adds mirrors for hundreds of sites in bulk.
 **Only transport failures count.** An HTTP-level rejection — a Cloudflare challenge above
 all — proves the domain is alive, so it never triggers a switch.
 
+**And every probe goes through the proxy**, because that is the only way the app reaches
+anything. This was wrong for a while and the symptom was specific: the home domain is
+chosen at launch by probing it, that probe ran before any route existed, so it went out
+directly — on a network where direct is exactly what does not work. The app rejected its
+own home domain, opened a mirror, and the domain it had just declared dead loaded fine
+through the proxy the moment you picked it by hand. The proxy is now built from settings
+rather than handed down, so there is no longer an ordering to get wrong, and
+`tools/tests/run.sh` fails if a site probe is ever written with a bare `URLSession`.
+
 ### Magnets go straight to the client
 
 Magnet and `.torrent` links are posted to a qBittorrent Web API rather than handed to
