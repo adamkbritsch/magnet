@@ -54,12 +54,20 @@ RESOURCE_TYPES = {
 
 # Options that mean "this rule does something WebKit cannot express". Keeping the
 # rule anyway would change its meaning, so drop it.
+# Options that make the whole rule untranslatable: whatever they express, WebKit
+# cannot, and guessing would over-block.
 UNSUPPORTED_OPTS = {
-    "csp", "redirect", "redirect-rule", "removeparam", "replace", "empty",
+    "csp", "removeparam", "replace", "empty",
     "mp4", "inline-script", "inline-font", "genericblock", "generichide",
-    "specifichide", "elemhide", "important", "badfilter", "cname", "urltransform",
+    "specifichide", "elemhide", "badfilter", "cname", "urltransform",
     "permissions", "header", "method", "to", "from", "denyallow", "ipaddress",
 }
+
+# Options that only DECORATE a block: the rule still says "block this", and the part
+# WebKit cannot do is the extra. Dropping the whole rule threw away the block as well,
+# which cost hundreds of real ones -- including the anti-adblock detector scripts,
+# whose whole purpose is to run when an advert did not.
+DECORATIVE_OPTS = {"important", "redirect", "redirect-rule"}
 
 
 def fetch(name, url, cache_dir):
@@ -201,6 +209,9 @@ def parse_options(optstr):
         if key in RESOURCE_TYPES:
             if not neg:
                 resource_types.append(RESOURCE_TYPES[key])
+            continue
+        if key in DECORATIVE_OPTS:
+            # Keep the block, lose the decoration.
             continue
         if key in UNSUPPORTED_OPTS:
             return None, False

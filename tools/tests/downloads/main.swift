@@ -188,6 +188,16 @@ check("a .torrent link is NOT judged as a magnet",
       !mag("https://tracker.example/download/123/thing.torrent"),
       "the validator answers for magnets only; the caller must not ask about .torrent")
 
+print("Test 4g - a frame does not get to start a download")
+// Measured in a live WKWebView: an iframe navigating to an attachment reaches the
+// response step with isForMainFrame false and becomes a WKDownload like any other --
+// and the page URL handed in is the MAIN page, so the frame's drop was judged against
+// an origin that had nothing to do with it.
+check("the frame check exists at all and refuses",
+      DownloadManager.shared.frameRefusal(isForMainFrame: false, fileURL: nil) != nil)
+check("the main frame is unaffected",
+      DownloadManager.shared.frameRefusal(isForMainFrame: true, fileURL: nil) == nil)
+
 print("Test 5 - a colliding destination gets a fresh name")
 let dir = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("x1337-dl-\(UUID().uuidString)")
