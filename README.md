@@ -207,10 +207,14 @@ Magnet and `.torrent` links are posted to a qBittorrent Web API rather than hand
 another application. Point it at a reverse proxy in front of the client rather than the
 client's own port, and it works on networks that block that port.
 
-A magnet is checked for an actual info hash first, and only a real link activation
-triggers the handoff. The scheme is trivial to forge, a page can point the window at one
-without you touching anything, and a torrent client is a poor place to discover a link
-was an advert.
+A magnet needs an actual info hash, a real click on a link to **that** torrent, and the
+main frame. All three, because the first two versions of this were not enough: gating on
+"WebKit called it a link activation" is gating on a signal a scripted `click()` forges,
+so a page could append an anchor to a magnet, click it itself, and put a torrent in your
+client having never been touched. The handoff also sat outside the main-frame check, so
+a cross-origin advert frame could reach it — and on the `.torrent` side it handed the
+client whatever URL the page named, making your seedbox fetch for a stranger. A
+`.torrent` URL now has to come from a host you actually use.
 
 ### Adding a site adds its search plugin
 

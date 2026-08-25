@@ -58,11 +58,13 @@ enum RedirectGuard {
               let destHost = destination.host else { return .allow }
         let dest = registrableDomain(destHost)
 
+        // Somewhere already refused, before anything else. Approving one destination
+        // makes the chain app-initiated, and an app-initiated chain used to short-
+        // circuit to allow above this line -- so a host you approved could 302 the
+        // window onward to one you had explicitly refused.
+        if denied.contains(dest) { return .block }
         // The app asked for it, and so did every redirect it triggers.
         if chain.appInitiated { return .allow }
-        // Somewhere already refused. Refusal outranks everything a page can arrange,
-        // because everything below this line is drawn from what pages do.
-        if denied.contains(dest) { return .block }
         // Where the chain was aimed, including that site's own redirects.
         if let anchor = chain.anchorDomain, anchor == dest { return .allow }
         // Still on the site being read.
@@ -91,15 +93,36 @@ enum RedirectGuard {
     /// outbound hrefs in flight (tracking parameters, http to https), and the domain
     /// is the part that decides anything here anyway.
     static func clickMatches(destination: URL,
-                             clicks: [(domain: String, at: Date)],
+                             clicks: [(key: String, at: Date)],
                              now: Date,
                              window: TimeInterval = 2.0) -> Bool {
-        guard let host = destination.host else { return false }
-        let dest = registrableDomain(host)
+        guard let dest = clickKey(for: destination) else { return false }
         return clicks.contains { click in
-            click.domain == dest && now.timeIntervalSince(click.at) <= window
+            click.key == dest && now.timeIntervalSince(click.at) <= window
                 && now.timeIntervalSince(click.at) >= 0
         }
+    }
+
+    /// What a click and a navigation are compared BY.
+    ///
+    /// For an ordinary link that is the registrable domain: sites rewrite outbound
+    /// hrefs in flight and the domain is the part that decides anything. A magnet has
+    /// no host at all, which is why magnet clicks were never recorded and the magnet
+    /// handoff had nothing better to trust than `navigationType` -- the signal a
+    /// scripted `click()` forges. Its identity is the info hash, which is the one part
+    /// of a magnet that names the torrent.
+    static func clickKey(for url: URL) -> String? {
+        if url.scheme?.lowercased() == "magnet" {
+            let raw = url.absoluteString.lowercased()
+            guard let range = raw.range(of: "xt=urn:bt") else { return nil }
+            let rest = raw[range.upperBound...]
+            // ih:<hash> or mh:<hash>, up to the next field.
+            let hash = rest.drop(while: { $0 != ":" }).dropFirst()
+                .prefix(while: { $0 != "&" })
+            return hash.isEmpty ? nil : "magnet:" + hash
+        }
+        guard let host = url.host else { return nil }
+        return registrableDomain(host)
     }
 
     /// What started the navigation, reduced to what actually matters here.
@@ -172,10 +195,23 @@ enum BannerBlocker {
     static func userScript() -> WKUserScript {
         let source = """
         (function () {
+          // Mirrors registrableDomain in Domains.swift, including the shared-platform
+          // suffixes -- a page on one of those is not the same site as its neighbour.
+          var SHARED = ['pages.dev','workers.dev','github.io','gitlab.io','netlify.app',
+            'netlify.com','vercel.app','web.app','firebaseapp.com','herokuapp.com',
+            'glitch.me','blogspot.com','wordpress.com','surge.sh','onrender.com',
+            'fly.dev','repl.co','replit.app','codeberg.page','sourceforge.io',
+            'translate.goog','s3.amazonaws.com','cloudfront.net','azurewebsites.net',
+            'appspot.com','r2.dev','trycloudflare.com','ngrok.io','ngrok-free.app'];
           function reg(host) {
             var h = String(host || '').toLowerCase();
             if (h.indexOf('www.') === 0) h = h.slice(4);
             var p = h.split('.');
+            for (var d = 3; d >= 2; d--) {
+              if (p.length > d && SHARED.indexOf(p.slice(-d).join('.')) >= 0) {
+                return p.slice(-(d + 1)).join('.');
+              }
+            }
             if (p.length >= 3 && p[p.length - 2].length <= 3 && p[p.length - 1].length <= 3) {
               return p.slice(-3).join('.');
             }
@@ -215,37 +251,100 @@ enum BannerBlocker {
             }
           }
 
+          // The standard display sizes. A wide-and-short test only ever caught the
+          // leaderboard; the box shapes -- 300x250 above all, the commonest unit on
+          // these sites -- are neither wide nor short and sailed straight past it.
+          var SLOTS = [[728,90],[970,90],[970,250],[468,60],[320,50],[300,250],[336,280],
+                       [300,600],[160,600],[120,600],[250,250],[200,200],[240,400],[580,400]];
+          function adShaped(w, h) {
+            if (w < 100 || h < 20) return false;
+            for (var i = 0; i < SLOTS.length; i++) {
+              // Slots are served at nominal size, but a wrapper can pad by a pixel or two.
+              if (Math.abs(w - SLOTS[i][0]) <= 4 && Math.abs(h - SLOTS[i][1]) <= 4) return true;
+            }
+            // The original rule, kept: anything wide and short is a leaderboard.
+            return w >= \(Int(minWidth)) && h >= 20 && (w / h) >= \(minRatio);
+          }
+
+          function bgURL(el) {
+            try {
+              var bg = getComputedStyle(el).backgroundImage || '';
+              var m = bg.match(/url\\(["']?([^"')]+)/);
+              return m ? m[1] : '';
+            } catch (e) { return ''; }
+          }
+
           function sweep() {
             sweepCatchers();
-            var imgs = document.images;
-            for (var i = 0; i < imgs.length; i++) {
-              var im = imgs[i];
-              if (im.getAttribute('data-x-banner')) continue;
-              var r = im.getBoundingClientRect();
-              if (r.width < \(Int(minWidth)) || r.height < 20) continue;
-              if (r.width / r.height < \(minRatio)) continue;
+            // Images, frames, and elements wearing their advert as a background. An
+            // ad served in an iframe was untouched by an image-only sweep, and that is
+            // how most networks deliver.
+            var nodes = document.querySelectorAll('img, iframe, video, ins, [style*="background"]');
+            for (var i = 0; i < nodes.length; i++) {
+              var el = nodes[i];
+              if (el.getAttribute('data-x-banner')) continue;
+              var r = el.getBoundingClientRect();
+              if (!adShaped(r.width, r.height)) continue;
 
-              var link = im.closest ? im.closest('a') : null;
+              var link = el.closest ? el.closest('a') : null;
+              var tag = el.tagName;
+              var src = tag === 'IMG' ? (el.getAttribute('src') || '')
+                      : tag === 'IFRAME' ? (el.getAttribute('src') || '')
+                      : bgURL(el);
               // Either the destination or the artwork itself belongs to someone else.
-              var leaves = (link && offsite(link.getAttribute('href')))
-                        || offsite(im.getAttribute('src'));
+              var leaves = (link && offsite(link.getAttribute('href'))) || offsite(src);
               if (!leaves) continue;
-
-              im.setAttribute('data-x-banner', '1');
-              var kill = link || im;
+              // A frame that is an advert has no text of yours in it to lose.
+              el.setAttribute('data-x-banner', '1');
+              var kill = link || el;
               kill.style.setProperty('display', 'none', 'important');
             }
           }
 
+          // Anti-adblock walls: the page locks scrolling and covers itself. Nothing
+          // here reads the blocker's state, it just refuses to be held still.
+          function unlock() {
+            try {
+              var docs = [document.documentElement, document.body];
+              for (var i = 0; i < docs.length; i++) {
+                if (!docs[i]) continue;
+                var cs = getComputedStyle(docs[i]);
+                if (cs.overflow === 'hidden' || cs.overflowY === 'hidden') {
+                  docs[i].style.setProperty('overflow', 'auto', 'important');
+                }
+                if (cs.position === 'fixed') {
+                  docs[i].style.setProperty('position', 'static', 'important');
+                }
+              }
+              var vw = window.innerWidth || 1280, vh = window.innerHeight || 800;
+              var all = document.querySelectorAll('div, section, aside');
+              for (var j = 0; j < all.length && j < 3000; j++) {
+                var el = all[j];
+                if (el.getAttribute('data-x-wall')) continue;
+                var cs2 = getComputedStyle(el);
+                if (cs2.position !== 'fixed' && cs2.position !== 'absolute') continue;
+                if ((parseInt(cs2.zIndex, 10) || 0) < 100) continue;
+                var r2 = el.getBoundingClientRect();
+                if (r2.width < vw * 0.9 || r2.height < vh * 0.9) continue;
+                el.setAttribute('data-x-wall', '1');
+                el.style.setProperty('display', 'none', 'important');
+              }
+            } catch (e) {}
+          }
+
           function start() {
             try { sweep(); } catch (e) {}
+            try { unlock(); } catch (e) {}
             if (window.MutationObserver && !document.documentElement.getAttribute('data-x-bwatch')) {
               document.documentElement.setAttribute('data-x-bwatch', '1');
               var t = null;
               new MutationObserver(function () {
                 if (t) clearTimeout(t);
                 // Banners are commonly injected after load, and rotated afterwards.
-                t = setTimeout(function () { try { sweep(); } catch (e) {} }, 150);
+                t = setTimeout(function () {
+                  try { sweep(); } catch (e) {}
+                  try { unlock(); } catch (e) {}
+                }, 150);
               }).observe(document.documentElement, { childList: true, subtree: true });
             }
           }

@@ -109,7 +109,10 @@ final class WebController: NSObject, ObservableObject {
     private static let denialQuietPeriod: TimeInterval = 8
     /// Where real pointers have recently been, reported by the in-page listener.
     /// What makes a "link activation" believable.
-    private var trustedClicks: [(domain: String, at: Date)] = []
+    private var trustedClicks: [(key: String, at: Date)] = []
+    /// A download the response step just asked about and was told yes. The download
+    /// door fires straight afterwards for the same file and must not ask twice.
+    private var approvedResponse: (url: URL?, at: Date)?
     private var observations: [NSKeyValueObservation] = []
     private var toastClear: DispatchWorkItem?
     private var challengeTimeout: DispatchWorkItem?
@@ -287,9 +290,12 @@ extension WebController: WKScriptMessageHandler {
         guard message.name == TrustedClicks.handlerName,
               let href = message.body as? String,
               let url = URL(string: href),
-              let host = url.host else { return }
+              // A magnet has no host, so this used to drop every magnet click on the
+              // floor -- which is why the magnet door had nothing better to trust than
+              // a navigation type a page can forge.
+              let key = RedirectGuard.clickKey(for: url) else { return }
         let now = Date()
-        trustedClicks.append((registrableDomain(host), now))
+        trustedClicks.append((key, now))
         // A few seconds of history is the whole point; more is just a list to scan.
         trustedClicks.removeAll { now.timeIntervalSince($0.at) > 4 }
     }
@@ -344,6 +350,11 @@ extension WebController: WKNavigationDelegate {
                                             chain: chain, known: knownDomains(for: url),
                                             approved: approvedDomains, denied: deniedDomains) {
                 case .allow:
+                    // Spent here, not at didCommit. The page currently on screen keeps
+                    // running for the whole provisional phase, so a flag that outlived
+                    // this decision let that page slip its own navigation through on
+                    // the trust of the one you asked for.
+                    chain.appInitiated = false
                     // Only now. Setting the anchor before the decision aimed the chain
                     // at the very URL being judged, so `anchor == destination` always
                     // held and every click was allowed -- which is why a link straight
@@ -382,26 +393,30 @@ extension WebController: WKNavigationDelegate {
 
         // The whole point of the old Torrent Control extension, done natively.
         //
-        // Only from an actual link activation. A torrent handed to the client is a
-        // download that starts, and a page that can reach this by assigning to
-        // `location` gets to start one whenever you click anything at all -- which is
-        // how a click on something unrelated turns into a torrent you did not choose.
-        // A real magnet link is an anchor, and clicking an anchor is `.linkActivated`;
-        // script-driven navigation is not.
-        let activated: Bool
-        switch navigationAction.navigationType {
-        case .linkActivated, .formSubmitted, .formResubmitted: activated = true
-        default: activated = false
-        }
-        if url.scheme?.lowercased() == "magnet" {
-            if activated { handleMagnet(url) }
+        // A torrent handed to the client is a download that starts, so it takes the
+        // same evidence a redirect does -- and for exactly the same reason. This once
+        // asked only whether WebKit called the navigation a link activation, which is
+        // the signal a scripted `click()` forges: a page could append an anchor to a
+        // magnet, click it itself, and put a torrent in your client having never been
+        // touched. It was also reachable from a cross-origin advert frame, and on the
+        // `.torrent` side it handed the client whatever URL the page named, making the
+        // seedbox fetch for a stranger.
+        let isMagnet = url.scheme?.lowercased() == "magnet"
+        if isMagnet || url.pathExtension.lowercased() == "torrent" {
             decisionHandler(.cancel)
-            return
-        }
-        // A .torrent file link is the other way trackers hand over a torrent.
-        if url.pathExtension.lowercased() == "torrent" {
-            if activated { handleMagnet(url) }
-            decisionHandler(.cancel)
+            // An advert in a frame does not get to add torrents to your client.
+            guard isMainFrame else { return }
+            // A real click on a link to this exact torrent, seen by the in-page
+            // listener that a page cannot lie to.
+            guard RedirectGuard.clickMatches(destination: url, clicks: trustedClicks,
+                                             now: Date()) else { return }
+            // A `.torrent` is a URL the CLIENT goes and fetches, so an untrusted one
+            // turns the seedbox into a fetcher for whatever address a page chooses.
+            if !isMagnet,
+               !DownloadManager.shared.isTrustedFileHost(url, pageURL: webView.url) {
+                return
+            }
+            handleMagnet(url)
             return
         }
         decisionHandler(.allow)
@@ -428,6 +443,11 @@ extension WebController: WKNavigationDelegate {
                 filename: url?.lastPathComponent ?? "",
                 host: url?.host ?? "an unknown host",
                 bytes: size > 0 ? size : nil)
+            // Answered here, so the download door does not ask the same question again
+            // a moment later. Two identical dialogs per file is not just noise: it is
+            // what teaches someone to tick "always allow" to stop the nagging, and
+            // that tick is the thing that makes a dropper silent.
+            if approved { approvedResponse = (url, Date()) }
             decisionHandler(approved ? .download : .cancel)
         case .refuse(let why):
             // Cancelled, not allowed: allowing an unrenderable response paints the
@@ -461,6 +481,13 @@ extension WebController: WKNavigationDelegate {
                                            userInitiated: navigationWasClicked) {
             download.cancel(nil)
             showToast(why, isError: true)
+            return
+        }
+        // Just answered at the response step for this same file.
+        if let recent = approvedResponse, recent.url == url,
+           Date().timeIntervalSince(recent.at) < 30 {
+            approvedResponse = nil
+            manager.attach(download, page: page)
             return
         }
         // A host approved once is not asked about again; everything else asks.
@@ -584,7 +611,11 @@ extension WebController: WKUIDelegate {
         // an unrecognised link is handed to the default browser — here that would
         // BE the ad behaviour, so target=_blank is dropped entirely. Magnets are
         // still caught, because they arrive through the navigation delegate.
-        if let url = navigationAction.request.url, url.scheme?.lowercased() == "magnet" {
+        // Same evidence as the main door. `window.open('magnet:...')` fired from a
+        // click on something unrelated leaves no matching trusted click, and a real
+        // target=_blank magnet anchor you clicked still does.
+        if let url = navigationAction.request.url, url.scheme?.lowercased() == "magnet",
+           RedirectGuard.clickMatches(destination: url, clicks: trustedClicks, now: Date()) {
             handleMagnet(url)
         }
         // Download links commonly open in a new tab, so dropping every target=_blank

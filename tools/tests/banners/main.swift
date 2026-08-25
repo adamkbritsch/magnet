@@ -194,7 +194,7 @@ print("\nA link activation needs a real click behind it")
 // listener records what REAL pointers land on -- isTrusted cannot be forged -- and a
 // claimed activation with no matching click is judged as the script it is.
 let now = Date()
-func clicks(_ entries: (String, TimeInterval)...) -> [(domain: String, at: Date)] {
+func clicks(_ entries: (String, TimeInterval)...) -> [(key: String, at: Date)] {
     entries.map { ($0.0, now.addingTimeInterval(-$0.1)) }
 }
 check("a real click on a link to the destination makes it believable",
@@ -214,8 +214,71 @@ check("matching is by domain, not exact URL, so rewritten hrefs still count",
                                  clicks: clicks(("someadvertiser.example", 0.5)), now: now))
 check("a click stamped in the future is not evidence",
       !RedirectGuard.clickMatches(destination: advert,
-                                  clicks: [("someadvertiser.example", now.addingTimeInterval(5))],
+                                  clicks: [(key: "someadvertiser.example", at: now.addingTimeInterval(5))],
                                   now: now))
+
+print("\nA magnet click has an identity, so the magnet door can require one")
+// This was the hole: a magnet has no host, so the click listener dropped every magnet
+// click, and the magnet door had nothing left to trust but navigationType -- the one
+// signal a scripted click() forges. A page could append an anchor to a magnet, click
+// it itself, and put a torrent in the client with nobody touching anything.
+let mag = URL(string: "magnet:?xt=urn:btih:0123456789ABCDEF0123456789abcdef01234567&dn=Thing")!
+check("a magnet has a click key at all", RedirectGuard.clickKey(for: mag) != nil,
+      String(describing: RedirectGuard.clickKey(for: mag)))
+check("keyed by its info hash",
+      RedirectGuard.clickKey(for: mag) == "magnet:0123456789abcdef0123456789abcdef01234567",
+      RedirectGuard.clickKey(for: mag) ?? "nil")
+// The same torrent named differently is the same torrent.
+let sameTorrent = URL(string: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Other&tr=http%3A%2F%2Fx")!
+check("a different display name is still the same magnet",
+      RedirectGuard.clickKey(for: mag) == RedirectGuard.clickKey(for: sameTorrent))
+let otherTorrent = URL(string: "magnet:?xt=urn:btih:ffffffffffffffffffffffffffffffffffffffff")!
+check("a different hash is a different magnet",
+      RedirectGuard.clickKey(for: mag) != RedirectGuard.clickKey(for: otherTorrent))
+check("a magnet with no hash has no identity",
+      RedirectGuard.clickKey(for: URL(string: "magnet:?dn=Free+Download")!) == nil)
+
+let magClicks: [(key: String, at: Date)] = [(RedirectGuard.clickKey(for: mag)!, now)]
+check("clicking THAT magnet is evidence for it",
+      RedirectGuard.clickMatches(destination: mag, clicks: magClicks, now: now))
+check("but not for a different torrent",
+      !RedirectGuard.clickMatches(destination: otherTorrent, clicks: magClicks, now: now))
+check("and a click on an ordinary link is not evidence for a magnet",
+      !RedirectGuard.clickMatches(destination: mag,
+                                  clicks: clicks(("tracker.example", 0.2)), now: now))
+
+print("\nA refusal outranks a chain the page can influence")
+// Approving one destination makes the chain app-initiated, and that used to be checked
+// FIRST -- so a host you approved could 302 the window onward to one you had refused.
+check("a denied domain is blocked even inside an app-initiated chain",
+      decide(advert, .script, chain: appChain, denied: ["someadvertiser.example"]) == .block)
+check("while an ordinary app-initiated chain still passes",
+      decide(URL(string: "https://tracker-canonical.example/")!, .script, chain: appChain) == .allow)
+
+print("\nA shared hosting platform is not one site")
+// The length rule cannot see these: evil.pages.dev and a-mirror.pages.dev both reduced
+// to pages.dev, so ONE mirror or bookmark on such a platform vouched for every stranger
+// on it -- enough for an advert there to count as a site you already go to.
+check("tenants of a shared platform stay distinct",
+      registrableDomain("evil.pages.dev") != registrableDomain("mirror.pages.dev"),
+      "\(registrableDomain("evil.pages.dev")) vs \(registrableDomain("mirror.pages.dev"))")
+check("and keep their own label",
+      registrableDomain("evil.pages.dev") == "evil.pages.dev",
+      registrableDomain("evil.pages.dev"))
+for host in ["a.github.io", "a.workers.dev", "a.netlify.app", "a.vercel.app",
+             "a.blogspot.com", "a.herokuapp.com", "a.web.app", "a.r2.dev"] {
+    check("\(host) keeps its tenant label", registrableDomain(host) == host,
+          registrableDomain(host))
+}
+check("a deeper path under a shared platform still reduces to the tenant",
+      registrableDomain("cdn.assets.evil.pages.dev") == "evil.pages.dev",
+      registrableDomain("cdn.assets.evil.pages.dev"))
+// The ordinary cases must be untouched.
+check("an ordinary domain is unchanged",
+      registrableDomain("search.extto.com") == "extto.com")
+check("a two-part suffix still keeps three labels",
+      registrableDomain("www.bbc.co.uk") == "bbc.co.uk", registrableDomain("www.bbc.co.uk"))
+check("a bare domain survives", registrableDomain("nyaa.si") == "nyaa.si")
 
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

@@ -135,6 +135,10 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func disposition(_ response: WKNavigationResponse,
                      pageURL: URL?, userInitiated: Bool) -> Disposition {
+        if let why = frameRefusal(isForMainFrame: response.isForMainFrame,
+                                  fileURL: response.response.url) {
+            return .refuse(why)
+        }
         let header = (response.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
         let fileURL = response.response.url
@@ -148,6 +152,20 @@ final class DownloadManager: NSObject, ObservableObject {
             userInitiated: userInitiated)
     }
 
+    /// An advert frame offering a file is not a download anyone asked for.
+    ///
+    /// Measured in a live WKWebView: an iframe navigating to an attachment reaches the
+    /// response step with `isForMainFrame` false and becomes a WKDownload like any
+    /// other -- and the page URL handed alongside it is the MAIN page, so a frame's
+    /// drop was being judged against an origin that had nothing to do with it.
+    nonisolated func frameRefusal(isForMainFrame: Bool, fileURL: URL?) -> String? {
+        guard !isForMainFrame else { return nil }
+        // A host approved by name is still allowed to deliver, frame or not.
+        if let host = fileURL?.host?.lowercased(),
+           Config.allowedDownloadHosts.contains(host) { return nil }
+        return "Blocked a download started by a frame on this page."
+    }
+
     /// The other door.
     ///
     /// A download that begins as a navigation ACTION never reaches the response
@@ -159,9 +177,15 @@ final class DownloadManager: NSObject, ObservableObject {
     ///
     /// Returns the reason to refuse, or nil to let it proceed.
     /// True when this host has been approved once and asked not to be asked again.
+    /// By exact host, never by registrable domain.
+    ///
+    /// A domain-wide grant is far larger than it looks: approving `tracker.tld` once
+    /// also approves every subdomain of it forever, and the payload that started all
+    /// of this was served from the tracker's own domain. One tick would have made it
+    /// silent for good.
     func isPreApproved(_ fileURL: URL?) -> Bool {
-        guard let host = fileURL?.host else { return false }
-        return Config.allowedDownloadHosts.contains(registrableDomain(host))
+        guard let host = fileURL?.host?.lowercased() else { return false }
+        return Config.allowedDownloadHosts.contains(host)
     }
 
     func refusalReason(forDownloadOf fileURL: URL?, page: URL?, userInitiated: Bool) -> String? {
@@ -180,11 +204,14 @@ final class DownloadManager: NSObject, ObservableObject {
     /// Whether this host has any business handing over a file: a site in the bar, the
     /// site being read, or one added by hand after being refused once.
     func isTrustedFileHost(_ fileURL: URL?, pageURL: URL?) -> Bool {
-        guard let fileURL, let host = fileURL.host else { return false }
+        guard let fileURL, let host = fileURL.host?.lowercased() else { return false }
         if isKnownSource(fileURL) { return true }
-        let domain = registrableDomain(host)
-        if let pageHost = pageURL?.host, registrableDomain(pageHost) == domain { return true }
-        return Config.allowedDownloadHosts.contains(domain)
+        // The EXACT host of the page, not its registrable domain. Same-domain was too
+        // generous in the one case that matters: a dropper on a subdomain of the site
+        // being read counted as the site itself, which is how five copies of an
+        // installer were filed under Games without anything looking wrong.
+        if let pageHost = pageURL?.host?.lowercased(), pageHost == host { return true }
+        return Config.allowedDownloadHosts.contains(host)
     }
 
     /// Asks, in a dialog, before anything is written.
@@ -220,9 +247,9 @@ final class DownloadManager: NSObject, ObservableObject {
         let approved = response == .alertSecondButtonReturn
         if approved, alert.suppressionButton?.state == .on, !host.isEmpty {
             var hosts = AppSettings.shared.allowedDownloadHosts
-            let domain = registrableDomain(host)
-            if !hosts.contains(domain) {
-                hosts.append(domain)
+            let exact = host.lowercased()
+            if !hosts.contains(exact) {
+                hosts.append(exact)
                 AppSettings.shared.allowedDownloadHosts = hosts
             }
         }
@@ -517,6 +544,27 @@ final class DownloadManager: NSObject, ObservableObject {
 }
 
 extension DownloadManager: WKDownloadDelegate {
+    /// A download that redirects somewhere untrusted is a different download.
+    ///
+    /// The host is checked when the download starts, and a 302 afterwards moves the
+    /// bytes to an address nobody judged -- so a link on a site you trust could hand
+    /// the actual file to anyone. The dialog would also have named the first host
+    /// while the file came from the second.
+    func download(_ download: WKDownload,
+                  willPerformHTTPRedirection response: HTTPURLResponse,
+                  newRequest request: URLRequest,
+                  decisionHandler: @escaping (WKDownload.RedirectPolicy) -> Void) {
+        let page = pages[download]
+        guard let destination = request.url else { decisionHandler(.cancel); return }
+        if isTrustedFileHost(destination, pageURL: page) || isPreApproved(destination) {
+            decisionHandler(.allow)
+            return
+        }
+        decisionHandler(.cancel)
+        onMessage?("Blocked a download that redirected to "
+                   + "\(destination.host ?? "another host") part way through.", true)
+    }
+
     func download(_ download: WKDownload,
                   decideDestinationUsing response: URLResponse,
                   suggestedFilename: String,
