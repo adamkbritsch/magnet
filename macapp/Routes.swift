@@ -101,6 +101,39 @@ enum ProxyCredentialStore {
     }
 }
 
+/// The proxy every request in this app goes through.
+///
+/// Built from settings rather than handed down from the route store, because the
+/// order matters and used to be wrong: the home domain is chosen at launch by
+/// probing it, and that probe ran before any route existed. It went out directly,
+/// on a network where direct is exactly what does not work, so the first domain was
+/// declared dead and the app opened a mirror -- while the domain it rejected loaded
+/// fine through the proxy seconds later. There is no direct route any more, so a
+/// direct probe measures a path the app never uses.
+enum ProxyRoute {
+    nonisolated static func configurations() -> [ProxyConfiguration] {
+        let host = Config.proxyHost
+        guard !host.isEmpty else { return [] }
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host),
+                                           port: NWEndpoint.Port(rawValue: Config.proxyPort) ?? 8888)
+        let config = ProxyConfiguration(httpCONNECTProxy: endpoint)
+        if let creds = ProxyCredentialStore.load() {
+            config.applyCredential(username: creds.user, password: creds.pass)
+        }
+        return [config]
+    }
+
+    /// A session that reaches sites the same way the web view does. Anything probing
+    /// a tracker must use this; a bare `URLSession` is measuring a different network.
+    nonisolated static func session(timeout: TimeInterval = 6) -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = timeout
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.proxyConfigurations = configurations()
+        return URLSession(configuration: config)
+    }
+}
+
 @MainActor
 final class RouteStore: ObservableObject {
     enum Status: Equatable {
@@ -203,18 +236,9 @@ final class RouteStore: ObservableObject {
     func proxyConfigurations() -> [ProxyConfiguration] {
         guard !proxyHost.trimmingCharacters(in: .whitespaces).isEmpty
         else { proxyNeedsCredentials = false; return [] }
-        let endpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(proxyHost),
-            port: NWEndpoint.Port(rawValue: proxyPort) ?? 8888
-        )
-        let config = ProxyConfiguration(httpCONNECTProxy: endpoint)
-        if let creds = ProxyCredentialStore.load() {
-            config.applyCredential(username: creds.user, password: creds.pass)
-            proxyNeedsCredentials = false
-        } else {
-            // Only a problem if one was ever saved; an open proxy needs none.
-            proxyNeedsCredentials = ProxyCredentialStore.exists()
-        }
-        return [config]
+        // Only a problem if one was ever saved; an open proxy needs none.
+        proxyNeedsCredentials = ProxyCredentialStore.load() == nil
+            && ProxyCredentialStore.exists()
+        return ProxyRoute.configurations()
     }
 }

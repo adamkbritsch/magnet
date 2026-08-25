@@ -17,22 +17,37 @@ run() {
 }
 
 run bookmarks  "$(dirname "$0")/bookmarks/main.swift"  "$SRC/Settings.swift" "$SRC/Bookmarks.swift"
-run settings   "$(dirname "$0")/settings/main.swift"   "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
-run wikipedia  "$(dirname "$0")/wikipedia/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
-run fmhy       "$(dirname "$0")/fmhy/main.swift"       "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
-run categories "$(dirname "$0")/categories/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
+run settings   "$(dirname "$0")/settings/main.swift"   "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
+run wikipedia  "$(dirname "$0")/wikipedia/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift"
+run fmhy       "$(dirname "$0")/fmhy/main.swift"       "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift"
+run categories "$(dirname "$0")/categories/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
 run banners    "$(dirname "$0")/banners/main.swift"    "$SRC/Domains.swift" "$SRC/Banners.swift"
-run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/Downloads.swift"
+run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/Downloads.swift"
 run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 if [ "${1:-}" = "--live" ]; then
   run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
   run plugins-live "$(dirname "$0")/pluginslive/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 fi
 
+# Every probe that touches a SITE must go through the proxy. A bare URLSession here
+# measures a network the app never browses on -- it is what made the app reject its
+# own home domain at launch and open a mirror instead. Scoped to Mirrors.swift: the
+# torrent client and the plugin catalogue are reached deliberately off-proxy.
+echo "=============== proxy discipline ==============="
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BARE="$(grep -nE 'URLSession\.shared|URLSession\(configuration:' "$ROOT/macapp/Mirrors.swift" 2>/dev/null || true)"
+if [ -n "$BARE" ]; then
+  echo "  FAIL  a site probe bypasses the proxy:"
+  echo "$BARE" | sed 's/^/        /'
+  fail=1
+else
+  echo "  PASS  every site probe goes through ProxyRoute"
+fi
+echo
+
 # Nothing that identifies one person's setup may reach the repository. Checked here
 # rather than left to review, because these creep back in one commit at a time.
 echo "=============== hygiene ==============="
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PATTERNS='britsch|adamkbritsch|dediseedbox|nl4422|100\.101\.182\.68|Plex Server|MediaVolume3|uvu\.edu|b4:0?c:25'
 LEAKS="$(cd "$ROOT" && grep -rInE "$PATTERNS" . \
   --exclude-dir=dist --exclude-dir=backup --exclude-dir=.git --exclude-dir=.cache \

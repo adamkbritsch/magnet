@@ -77,7 +77,32 @@ MainActor.assumeIsolated {
     check("key removed", UserDefaults.standard.object(forKey: "home.url") == nil)
     check("and reads back as unset", s.home == nil)
 
+    print("Test 7 - the proxy is built from settings, not handed down")
+    // The launch order was the bug: the home domain is chosen by probing it, and that
+    // probe ran before any route existed, so it went out directly -- on a network
+    // where direct is precisely what does not work, so the app rejected its own home
+    // domain and opened a mirror. Building from settings removes the ordering
+    // entirely; there is nothing left to be too early for.
+    let store = UserDefaults.standard
+    store.removeObject(forKey: "proxy.host")
+    check("no proxy configured means no proxy configuration",
+          ProxyRoute.configurations().isEmpty)
+    store.set("proxy.invalid", forKey: "proxy.host")
+    store.set(8899, forKey: "proxy.port")
+    check("a configured proxy produces one, with no route store involved",
+          ProxyRoute.configurations().count == 1)
+    check("and a probe session carries it",
+          !ProxyRoute.session().configuration.proxyConfigurations.isEmpty)
+    check("the port reads back", Config.proxyPort == 8899, "\(Config.proxyPort)")
+    store.set(0, forKey: "proxy.port")
+    check("a zero port falls back rather than producing an invalid endpoint",
+          Config.proxyPort == 8888, "\(Config.proxyPort)")
+    store.set(70000, forKey: "proxy.port")
+    check("and so does one out of range", Config.proxyPort == 8888, "\(Config.proxyPort)")
+
     s.resetAll()
+    store.removeObject(forKey: "proxy.host")
+    store.removeObject(forKey: "proxy.port")
     print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 }
 exit(failures == 0 ? 0 : 1)

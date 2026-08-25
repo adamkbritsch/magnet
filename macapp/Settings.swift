@@ -255,6 +255,14 @@ enum Config {
         return s.isEmpty ? "\(bundleID).qbittorrent" : s
     }
 
+    /// The proxy address, readable without the MainActor -- every probe in the app
+    /// has to reach it, and probes run wherever they run.
+    static var proxyHost: String { string("proxy.host") }
+    static var proxyPort: UInt16 {
+        let stored = d.integer(forKey: "proxy.port")
+        return stored > 0 && stored <= 65535 ? UInt16(stored) : 8888
+    }
+
     static var nasHost: String { string("nas.host") }
     static var nasShare: String { string("nas.share") }
     static var nasUser: String { string("nas.user") }
