@@ -35,6 +35,7 @@ fi
 # torrent client and the plugin catalogue are reached deliberately off-proxy.
 # WebKit's compiler is all-or-nothing: one malformed rule fails the whole list, and
 # the app swallows it. Half the blocking once vanished this way with no symptom.
+run pagesafety "$(dirname "$0")/pagesafety/main.swift" "$SRC/Domains.swift" "$SRC/Banners.swift"
 run blocklists "$(dirname "$0")/blocklists/main.swift"
 echo "=============== proxy discipline ==============="
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
