@@ -69,5 +69,21 @@ check("Nyaa found with mirrors", (hosts(nyaa).count) >= 2, "got \(hosts(nyaa))")
 check("every group spans at least two real domains",
       sets.values.allSatisfy { Set($0.candidates.compactMap { $0.host.map(registrableDomain) }).count >= 2 })
 
+print("\nA plain-HTTP bookmark is not a dead site")
+// AudioBook Bay is the case this came from: the bookmarked host serves no TLS at all,
+// so App Transport Security refuses it before the request leaves the process. That is
+// not the site answering badly -- it is this domain being unreachable AS WRITTEN,
+// which is exactly what another domain is for. Left out of the transport-failure set,
+// the chip simply reported an error and never tried the domain that works.
+check("an ATS refusal counts as a transport failure",
+      WebFailure.isTransport(NSURLErrorAppTransportSecurityRequiresSecureConnection))
+check("so does a dead host",
+      WebFailure.isTransport(NSURLErrorCannotFindHost))
+// A Cloudflare challenge is an HTTP answer and proves the domain is alive.
+check("but an HTTP-level rejection is not",
+      !WebFailure.isTransport(NSURLErrorBadServerResponse))
+check("nor is a cancelled navigation",
+      !WebFailure.isTransport(NSURLErrorCancelled))
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

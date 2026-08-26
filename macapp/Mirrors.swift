@@ -194,6 +194,15 @@ final class MirrorDirectory: ObservableObject {
     func preferredURL(for url: URL) async -> URL {
         let target = resolve(url)
         if await Reachability.answers(target) { return target }
+        // The same host over TLS, before giving up on it. A bookmark saved as plain
+        // HTTP is refused by App Transport Security before it reaches the network, and
+        // for many of these sites the identical host also answers on https -- so the
+        // cheapest alternate is the one already in front of us.
+        if target.scheme?.lowercased() == "http",
+           var parts = URLComponents(url: target, resolvingAgainstBaseURL: false) {
+            parts.scheme = "https"
+            if let secure = parts.url, await Reachability.answers(secure) { return secure }
+        }
         return await alternate(for: target) ?? target
     }
 
@@ -275,6 +284,29 @@ enum MirrorError: LocalizedError {
 }
 
 // MARK: - Reachability
+
+/// Which failures mean "this domain cannot be reached", as opposed to the site
+/// answering with something unwelcome.
+///
+/// Only these justify moving to another domain: an HTTP-level rejection -- a
+/// Cloudflare 403 above all -- still proves the domain is alive, and switching away
+/// from it would be wrong.
+enum WebFailure {
+    static let transport: Set<Int> = [
+        NSURLErrorCannotFindHost,
+        NSURLErrorCannotConnectToHost,
+        NSURLErrorDNSLookupFailed,
+        NSURLErrorTimedOut,
+        NSURLErrorSecureConnectionFailed,
+        NSURLErrorNetworkConnectionLost,
+        // A plain-HTTP site refused by App Transport Security. The request never
+        // leaves the process, so the domain is unreachable AS WRITTEN -- precisely
+        // what another domain is for.
+        NSURLErrorAppTransportSecurityRequiresSecureConnection,
+    ]
+
+    static func isTransport(_ code: Int) -> Bool { transport.contains(code) }
+}
 
 enum Reachability {
     /// Reachability, not success -- the same rule the route probe uses. A Cloudflare

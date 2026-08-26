@@ -550,19 +550,6 @@ extension WebController: WKNavigationDelegate {
         report(error)
     }
 
-    /// Failures that mean the domain itself is not answering, rather than the site
-    /// answering with something unwelcome. Only these justify moving to another
-    /// domain: an HTTP-level rejection -- a Cloudflare 403 above all -- still
-    /// proves the domain is alive, and switching away from it would be wrong.
-    private static let transportFailures: Set<Int> = [
-        NSURLErrorCannotFindHost,
-        NSURLErrorCannotConnectToHost,
-        NSURLErrorDNSLookupFailed,
-        NSURLErrorTimedOut,
-        NSURLErrorSecureConnectionFailed,
-        NSURLErrorNetworkConnectionLost,
-    ]
-
     private func report(_ error: Error) {
         let ns = error as NSError
         if ns.code == NSURLErrorCancelled { return }
@@ -578,7 +565,7 @@ extension WebController: WKNavigationDelegate {
 
         // A site that publishes several domains gets moved to one that answers
         // rather than reported as broken.
-        if ns.domain == NSURLErrorDomain, Self.transportFailures.contains(ns.code),
+        if ns.domain == NSURLErrorDomain, WebFailure.isTransport(ns.code),
            let failing, let set = MirrorDirectory.shared.set(owning: failing) {
             showToast("\(set.name) is not answering on \(failing.host ?? "that domain") — trying another…",
                       isError: false)
@@ -589,6 +576,19 @@ extension WebController: WKNavigationDelegate {
                     self.showToast("No working domain found for \(set.name)", isError: true)
                 }
             }
+            onLoadFailure?(ns.localizedDescription)
+            return
+        }
+
+        // Worth naming, because the remedy is a rebuild rather than anything in
+        // Settings: ATS lives in the bundle's Info.plist and cannot be changed while
+        // the app runs.
+        if ns.domain == NSURLErrorDomain,
+           ns.code == NSURLErrorAppTransportSecurityRequiresSecureConnection {
+            let host = failing?.host ?? "That site"
+            showToast("\(host) is plain HTTP, which macOS blocks. Use an https domain "
+                      + "for it, or add the host to MAGNET_HTTP_HOSTS in local.env and "
+                      + "rebuild.", isError: true)
             onLoadFailure?(ns.localizedDescription)
             return
         }
