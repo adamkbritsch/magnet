@@ -33,6 +33,9 @@ fi
 # measures a network the app never browses on -- it is what made the app reject its
 # own home domain at launch and open a mirror instead. Scoped to Mirrors.swift: the
 # torrent client and the plugin catalogue are reached deliberately off-proxy.
+# WebKit's compiler is all-or-nothing: one malformed rule fails the whole list, and
+# the app swallows it. Half the blocking once vanished this way with no symptom.
+run blocklists "$(dirname "$0")/blocklists/main.swift"
 echo "=============== proxy discipline ==============="
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BARE="$(grep -nE 'URLSession\.shared|URLSession\(configuration:' "$ROOT/macapp/Mirrors.swift" 2>/dev/null || true)"
