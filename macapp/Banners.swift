@@ -301,8 +301,14 @@ enum BannerBlocker {
             }
           }
 
-          // Anti-adblock walls: the page locks scrolling and covers itself. Nothing
-          // here reads the blocker's state, it just refuses to be held still.
+          // Scroll locks only. Nothing here HIDES anything.
+          //
+          // This once also hid any large, high-z-index, positioned element, on the
+          // theory that such a thing is an anti-adblock wall. On a real page that
+          // description fits the page's own content wrapper, so it blanked every site
+          // it was pointed at -- the whole app, dark, with no error to explain it. A
+          // wall and a layout are not distinguishable by shape, and the cost of being
+          // wrong is the entire page, so the guess is not worth making.
           function unlock() {
             try {
               var docs = [document.documentElement, document.body];
@@ -312,22 +318,6 @@ enum BannerBlocker {
                 if (cs.overflow === 'hidden' || cs.overflowY === 'hidden') {
                   docs[i].style.setProperty('overflow', 'auto', 'important');
                 }
-                if (cs.position === 'fixed') {
-                  docs[i].style.setProperty('position', 'static', 'important');
-                }
-              }
-              var vw = window.innerWidth || 1280, vh = window.innerHeight || 800;
-              var all = document.querySelectorAll('div, section, aside');
-              for (var j = 0; j < all.length && j < 3000; j++) {
-                var el = all[j];
-                if (el.getAttribute('data-x-wall')) continue;
-                var cs2 = getComputedStyle(el);
-                if (cs2.position !== 'fixed' && cs2.position !== 'absolute') continue;
-                if ((parseInt(cs2.zIndex, 10) || 0) < 100) continue;
-                var r2 = el.getBoundingClientRect();
-                if (r2.width < vw * 0.9 || r2.height < vh * 0.9) continue;
-                el.setAttribute('data-x-wall', '1');
-                el.style.setProperty('display', 'none', 'important');
               }
             } catch (e) {}
           }
