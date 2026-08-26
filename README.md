@@ -270,14 +270,26 @@ from under you.
 
 ### Blocking
 
-uBlock Origin's own lists, converted to WebKit's native content blocker. Three things
+uBlock Origin's own lists, converted to WebKit's native content blocker. Four things
 that cost a debugging cycle each:
+
+- **"uBlock filters" is not one file.** uBO splits its own set by the year a rule was
+  added: `filters.txt` holds only the current year's, and everything before that lives
+  in `filters-2020` … `filters-2026`, `filters-general` and `quick-fixes`. Fetching
+  `filters.txt` alone ships the newest slice of uBO's knowledge and none of the
+  accumulated rest.
 
 - **WebKit's regex is a PCRE subset, and one bad rule fails the whole list.** No `\w` or
   `\d`, no `{n,m}`, no `(a|b)`, ASCII only.
 - **`ignore-previous-rules` only cancels within the same compiled list**, so every block
   chunk must carry the full exception set or sites silently over-block.
 - uBO's cosmetic filters must be stripped before the network parser sees them.
+- **uBO lets a regex stand where a hostname goes** — in `$domain=` and before `##`.
+  WebKit's `if-domain` takes hostnames only, so one passed through plants a `^` inside
+  a domain pattern, which it rejects. Compilation is all-or-nothing, so **four such
+  rules out of 144,000 silently took two of the four lists out of service** — half the
+  blocking gone while the shield still read "Blocking". `tools/tests/run.sh` now
+  compiles every list, because nothing about the app's behaviour reveals this.
 
 **Lists rot, and that failure is invisible.** uBO refreshes EasyList every few days
 because ad hosts rotate constantly; a snapshot a month old blocks last month's networks

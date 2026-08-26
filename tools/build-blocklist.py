@@ -22,15 +22,35 @@ import re
 import sys
 import urllib.request
 
-# uBO's own default set, minus the ones that are mostly scriptlet-driven.
+# uBO's own default set.
+#
+# "uBlock filters" is NOT one file. uBO splits it by the year a rule was added --
+# filters.txt holds only the current year's, and everything it learned before that
+# lives in filters-2020 through filters-2026, filters-general and quick-fixes. This
+# fetched filters.txt alone for months, which meant shipping the newest slice of uBO's
+# knowledge and none of the accumulated rest: the overwhelming majority of the ad hosts
+# these sites use were never in the compiled lists at all.
+_UBO = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/"
 SOURCES = [
     ("easylist",      "https://easylist.to/easylist/easylist.txt"),
     ("easyprivacy",   "https://easylist.to/easylist/easyprivacy.txt"),
-    ("ubo-filters",   "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt"),
-    ("ubo-privacy",   "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy.txt"),
-    ("ubo-badware",   "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/badware.txt"),
-    ("ubo-resources", "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/resource-abuse.txt"),
-    ("ubo-unbreak",   "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/unbreak.txt"),
+    # Peter Lowe's ad-server list, the third of uBO's enabled-by-default sets.
+    ("plowe",         "https://pgl.yoyo.org/adservers/serverlist.php"
+                      "?hostformat=adblockplus&mimetype=plaintext"),
+    ("ubo-filters",   _UBO + "filters.txt"),
+    ("ubo-2020",      _UBO + "filters-2020.txt"),
+    ("ubo-2021",      _UBO + "filters-2021.txt"),
+    ("ubo-2022",      _UBO + "filters-2022.txt"),
+    ("ubo-2023",      _UBO + "filters-2023.txt"),
+    ("ubo-2024",      _UBO + "filters-2024.txt"),
+    ("ubo-2025",      _UBO + "filters-2025.txt"),
+    ("ubo-2026",      _UBO + "filters-2026.txt"),
+    ("ubo-general",   _UBO + "filters-general.txt"),
+    ("ubo-quickfix",  _UBO + "quick-fixes.txt"),
+    ("ubo-privacy",   _UBO + "privacy.txt"),
+    ("ubo-badware",   _UBO + "badware.txt"),
+    ("ubo-resources", _UBO + "resource-abuse.txt"),
+    ("ubo-unbreak",   _UBO + "unbreak.txt"),
 ]
 
 # WebKit compiles at most this many rules per list; we split across lists instead
@@ -131,6 +151,48 @@ def escape_regex(s):
     return re.sub(r"([.+?^${}()|\[\]\\/])", r"\\\1", s)
 
 
+def is_regex_domain(d):
+    """uBO lets a regex stand where a hostname goes, in `$domain=` and before `##`.
+
+    WebKit's if-domain takes hostnames only, so passing one through plants a `^`
+    inside a domain pattern -- which it rejects, failing the ENTIRE compiled list.
+    Two of the four lists were lost to exactly four such rules.
+    """
+    d = d.strip().lstrip("~")
+    return len(d) > 2 and d.startswith("/") and d.endswith("/")
+
+
+def has_stray_anchor(rx):
+    """A `^` or `$` where WebKit forbids one: anywhere but the very ends.
+
+    Structure-aware on purpose. The naive test flags `[^/]*`, which is the character
+    class every domain-anchored rule is built from -- it read as 95% of the corpus
+    being malformed.
+    """
+    i, n = 0, len(rx)
+    in_class = False
+    while i < n:
+        c = rx[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            i += 1
+            continue
+        if c == "^" and i != 0:
+            return True
+        if c == "$" and i != n - 1:
+            return True
+        i += 1
+    return False
+
+
 def pattern_to_url_filter(pattern):
     """ABP pattern -> WebKit url-filter regex. Returns None if unrepresentable."""
     if pattern.startswith("/") and pattern.endswith("/") and len(pattern) > 2:
@@ -146,6 +208,16 @@ def pattern_to_url_filter(pattern):
     elif pattern.startswith("|"):
         pattern = pattern[1:]
         anchor_start = True
+
+    # `||/^host\.example$/` -- uBO lets a regex stand where a hostname goes. The
+    # literal check above runs before `||` is stripped, so these fell through and were
+    # escaped as if they were text, planting a `^` in the middle of the generated
+    # pattern. WebKit rejects a non-initial start-of-line assertion, and one rejected
+    # rule fails the ENTIRE compiled list -- so a handful of these silently took two
+    # of the four lists out of service. There is no domain-anchored-regex form in
+    # WebKit to translate them into.
+    if pattern.startswith("/") and pattern.endswith("/") and len(pattern) > 2:
+        return None
     if pattern.endswith("|"):
         pattern = pattern[:-1]
         anchor_end = True
@@ -185,6 +257,15 @@ def parse_options(optstr):
 
         if key.startswith("domain="):
             doms = key[len("domain="):].split("|")
+            # uBO lets a REGEX stand where a domain list goes:
+            # `$domain=/^main\.example[a-z0-9-]+\.click$/`. WebKit's if-domain takes
+            # hostnames only, and passing one through planted a `^` inside a domain
+            # pattern -- which it rejects, failing the whole compiled list. This cost
+            # two of the four lists, silently, while the shield still read "Blocking".
+            if any(is_regex_domain(d) for d in doms if d):
+                # Scoped to domains that cannot be expressed. Applying it unscoped
+                # would over-block; dropping the exclusion would too.
+                return None, False
             inc = [d.lower() for d in doms if d and not d.startswith("~")]
             exc = [d[1:].lower() for d in doms if d.startswith("~")]
             # WebKit rejects a rule carrying both; prefer the positive form.
@@ -244,6 +325,8 @@ def convert_line(line):
             return None
         if "#@#" in line:
             return None
+        if domains and any(is_regex_domain(d) for d in domains.split(",") if d):
+            return None
         trigger = {"url-filter": ".*"}
         if domains:
             inc = [d.lower() for d in domains.split(",") if d and not d.startswith("~")]
@@ -270,6 +353,10 @@ def convert_line(line):
             return None
 
     url_filter = pattern_to_url_filter(pattern)
+    # Belt and braces for the whole class: an anchor somewhere WebKit will not accept.
+    # Cheaper to drop one rule than to lose the 45,000 it is compiled alongside.
+    if url_filter and has_stray_anchor(url_filter):
+        return None
     if not url_filter or len(url_filter) > 1800:
         return None
     if not webkit_regex_ok(url_filter):
