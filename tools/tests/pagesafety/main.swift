@@ -25,6 +25,12 @@ let page = """
  #sticky { position:fixed; top:0; left:0; width:100%; height:60px; z-index:999; background:#222 }
 </style></head><body>
  <div id="sticky">site nav</div>
+ <iframe id="turnstile" src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/x"
+    style="width:300px;height:65px;border:0"></iframe>
+ <iframe id="turnstile2" src="https://challenges.cloudflare.com/turnstile/v0/x"
+    style="width:302px;height:77px;border:0"></iframe>
+ <iframe id="hcaptcha" src="https://hcaptcha.com/captcha/v1/x"
+    style="width:302px;height:76px;border:0"></iframe>
  <div id="wrap"><div id="inner">
    <h1 id="title">Tracker</h1>
    <table id="listing"><tr><td id="row1">Some.Release.2026.1080p</td></tr></table>
@@ -61,7 +67,9 @@ MainActor.assumeIsolated {
           return JSON.stringify({wrap:vis('wrap'), inner:vis('inner'), title:vis('title'),
             listing:vis('listing'), row1:vis('row1'), poster:vis('poster'),
             sticky:vis('sticky'), ownbanner:vis('ownbanner'),
-            realad:vis('realad'), adframe:vis('adframe')});
+            realad:vis('realad'), adframe:vis('adframe'),
+            turnstile:vis('turnstile'), turnstile2:vis('turnstile2'),
+            hcaptcha:vis('hcaptcha')});
         })();
         """
         w.evaluateJavaScript(js) { v, _ in
@@ -78,6 +86,18 @@ MainActor.assumeIsolated {
             check("a poster is not an advert", o["poster"] == "visible", o["poster"] ?? "?")
             check("the site's OWN wide banner stays", o["ownbanner"] == "visible", o["ownbanner"] ?? "?")
             check("a fixed site header stays", o["sticky"] == "visible", o["sticky"] ?? "?")
+
+            // The one that stopped the whole app: Turnstile is an off-domain iframe
+            // about 300x65, and 300/65 is 4.6 -- wide and short, which the leaderboard
+            // rule read as an advert. Hidden, the challenge cannot be answered, so
+            // every protected site spins on "Performing security verification" for
+            // ever. A verifier is never an advert, whatever shape it is.
+            print("\nAnything that verifies you are not a robot survives")
+            check("Cloudflare Turnstile (300x65) survives", o["turnstile"] == "visible",
+                  o["turnstile"] ?? "?")
+            check("Turnstile at its other size survives", o["turnstile2"] == "visible",
+                  o["turnstile2"] ?? "?")
+            check("hCaptcha survives", o["hcaptcha"] == "visible", o["hcaptcha"] ?? "?")
 
             print("\nAnd the adverts do not")
             check("an offsite 300x250 box is hidden", o["realad"] == "hidden", o["realad"] ?? "?")
