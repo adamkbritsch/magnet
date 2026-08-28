@@ -234,6 +234,9 @@ enum BannerBlocker {
           // navigation policy and only its SHAPE gives it away -- covering the view,
           // holding nothing, and leaving the site.
           function sweepCatchers() {
+            // A challenge page is mostly one big interactive surface; nothing on it is
+            // an advert, and hiding any of it strands the page.
+            if (isVerification(location.href)) return;
             var vw = window.innerWidth || 1280, vh = window.innerHeight || 800;
             var links = document.querySelectorAll('a');
             for (var i = 0; i < links.length; i++) {
@@ -256,13 +259,38 @@ enum BannerBlocker {
           // these sites -- are neither wide nor short and sailed straight past it.
           var SLOTS = [[728,90],[970,90],[970,250],[468,60],[320,50],[300,250],[336,280],
                        [300,600],[160,600],[120,600],[250,250],[200,200],[240,400],[580,400]];
-          function adShaped(w, h) {
+          // Anything that verifies a person is not a robot. Never touched.
+          //
+          // Cloudflare's Turnstile is an off-domain IFRAME about 300x65, and 300/65 is
+          // 4.6 -- wide and short, which the leaderboard rule below reads as an advert.
+          // Hiding it leaves the challenge unanswerable, so every protected site spins
+          // on "Performing security verification" for ever. That is the entire app,
+          // stopped, by a heuristic aimed at banners.
+          var VERIFIERS = ['challenges.cloudflare.com', 'hcaptcha.com', 'recaptcha.net',
+            'google.com/recaptcha', 'gstatic.com/recaptcha', 'turnstile', 'arkoselabs.com',
+            'funcaptcha.com', 'geetest.com', 'friendlycaptcha.com', 'captcha-delivery.com',
+            'perimeterx.net', 'datadome.co', 'imperva.com', 'incapsula.com'];
+          function isVerification(url) {
+            if (!url) return false;
+            var u = String(url).toLowerCase();
+            // Cloudflare serves the challenge from the SITE'S OWN origin under this
+            // path, so a host check alone would miss it.
+            if (u.indexOf('/cdn-cgi/') >= 0) return true;
+            for (var i = 0; i < VERIFIERS.length; i++) {
+              if (u.indexOf(VERIFIERS[i]) >= 0) return true;
+            }
+            return false;
+          }
+
+          function adShaped(w, h, exactOnly) {
             if (w < 100 || h < 20) return false;
             for (var i = 0; i < SLOTS.length; i++) {
               // Slots are served at nominal size, but a wrapper can pad by a pixel or two.
               if (Math.abs(w - SLOTS[i][0]) <= 4 && Math.abs(h - SLOTS[i][1]) <= 4) return true;
             }
-            // The original rule, kept: anything wide and short is a leaderboard.
+            // The leaderboard rule is for ARTWORK only. Applied to a frame it catches
+            // any wide, short widget -- which is what a verification box looks like.
+            if (exactOnly) return false;
             return w >= \(Int(minWidth)) && h >= 20 && (w / h) >= \(minRatio);
           }
 
@@ -283,14 +311,19 @@ enum BannerBlocker {
             for (var i = 0; i < nodes.length; i++) {
               var el = nodes[i];
               if (el.getAttribute('data-x-banner')) continue;
-              var r = el.getBoundingClientRect();
-              if (!adShaped(r.width, r.height)) continue;
-
-              var link = el.closest ? el.closest('a') : null;
               var tag = el.tagName;
               var src = tag === 'IMG' ? (el.getAttribute('src') || '')
                       : tag === 'IFRAME' ? (el.getAttribute('src') || '')
                       : bgURL(el);
+              // Before any measurement: a verifier is never an advert, whatever shape
+              // it happens to be.
+              if (isVerification(src) || isVerification(location.href)) continue;
+              var r = el.getBoundingClientRect();
+              // A frame must match a real ad slot exactly; only artwork gets judged by
+              // the wide-and-short rule.
+              if (!adShaped(r.width, r.height, tag !== 'IMG')) continue;
+
+              var link = el.closest ? el.closest('a') : null;
               // Either the destination or the artwork itself belongs to someone else.
               var leaves = (link && offsite(link.getAttribute('href'))) || offsite(src);
               if (!leaves) continue;
