@@ -142,7 +142,13 @@ struct RootView: View {
             homeURL = nil
             return
         }
-        homeURL = await MirrorDirectory.shared.preferredURL(for: configured)
+        // Resolved, not probed. This used to pre-flight the home domain and then every
+        // mirror of it, serially, six seconds each -- measured at THIRTY SECONDS before
+        // the first byte was requested, with an empty window the whole time. The probe
+        // bought nothing: a domain that is genuinely down still fails on load, and the
+        // failure path already moves to one that answers. So: show the page, and let
+        // being wrong cost a redirect rather than making being right cost half a minute.
+        homeURL = MirrorDirectory.shared.resolve(configured)
         await routes.resolve()
         applyRoute()
     }

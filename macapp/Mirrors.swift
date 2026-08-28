@@ -181,12 +181,25 @@ final class MirrorDirectory: ObservableObject {
     func alternate(for failed: URL) async -> URL? {
         guard let set = set(owning: failed) else { return nil }
         let others = set.candidates.filter { $0.host != failed.host }
-        for candidate in others where await Reachability.answers(candidate) {
-            remember(candidate, for: set.id)
-            onSwitch?(set.name, candidate)
-            return rehost(failed, onto: candidate)
+        guard !others.isEmpty else { return nil }
+
+        // All at once, in the published order. Probing them one after another cost six
+        // seconds per dead domain, and a site rotates domains precisely because the
+        // earlier ones stopped answering -- so the serial walk paid the full timeout
+        // for every domain that had already gone, before reaching the live one.
+        let winner: URL? = await withTaskGroup(of: (Int, Bool).self) { group in
+            for (index, candidate) in others.enumerated() {
+                group.addTask { (index, await Reachability.answers(candidate)) }
+            }
+            var live: [Int] = []
+            for await (index, ok) in group where ok { live.append(index) }
+            // The publisher's preferred domain wins, not whichever answered first.
+            return live.min().map { others[$0] }
         }
-        return nil
+        guard let candidate = winner else { return nil }
+        remember(candidate, for: set.id)
+        onSwitch?(set.name, candidate)
+        return rehost(failed, onto: candidate)
     }
 
     /// The URL to actually open for a given target: the remembered replacement if
