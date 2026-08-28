@@ -135,10 +135,6 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func disposition(_ response: WKNavigationResponse,
                      pageURL: URL?, userInitiated: Bool) -> Disposition {
-        if let why = frameRefusal(isForMainFrame: response.isForMainFrame,
-                                  fileURL: response.response.url) {
-            return .refuse(why)
-        }
         let header = (response.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
         let fileURL = response.response.url
@@ -149,7 +145,9 @@ final class DownloadManager: NSObject, ObservableObject {
             fromKnownSource: pageURL.map(isKnownSource) ?? false,
             fileFromTrustedHost: isTrustedFileHost(fileURL, pageURL: pageURL),
             fileHost: fileURL?.host ?? "somewhere else",
-            userInitiated: userInitiated)
+            userInitiated: userInitiated,
+            isForMainFrame: response.isForMainFrame,
+            framePreApproved: isPreApproved(fileURL))
     }
 
     /// An advert frame offering a file is not a download anyone asked for.
@@ -158,13 +156,7 @@ final class DownloadManager: NSObject, ObservableObject {
     /// response step with `isForMainFrame` false and becomes a WKDownload like any
     /// other -- and the page URL handed alongside it is the MAIN page, so a frame's
     /// drop was being judged against an origin that had nothing to do with it.
-    nonisolated func frameRefusal(isForMainFrame: Bool, fileURL: URL?) -> String? {
-        guard !isForMainFrame else { return nil }
-        // A host approved by name is still allowed to deliver, frame or not.
-        if let host = fileURL?.host?.lowercased(),
-           Config.allowedDownloadHosts.contains(host) { return nil }
-        return "Blocked a download started by a frame on this page."
-    }
+
 
     /// The other door.
     ///
@@ -286,8 +278,21 @@ final class DownloadManager: NSObject, ObservableObject {
                                         fromKnownSource: Bool,
                                         fileFromTrustedHost: Bool,
                                         fileHost: String,
-                                        userInitiated: Bool) -> Disposition {
+                                        userInitiated: Bool,
+                                        isForMainFrame: Bool = true,
+                                        framePreApproved: Bool = false) -> Disposition {
         let offered = !canShowMIMEType || isAttachment
+
+        // A frame may load a PAGE; it may not hand over a FILE.
+        //
+        // The order here is the whole thing. Asked before `offered`, this refused every
+        // subframe response there is -- so no iframe on any site could load at all,
+        // including the one Cloudflare puts its challenge in. Every protected site sat
+        // on "Performing security verification" for ever, and the toast said a download
+        // had been blocked, which was true of nothing.
+        if offered, !isForMainFrame, !framePreApproved {
+            return .refuse("Blocked a download started by a frame on this page.")
+        }
 
         if !fileFromTrustedHost, offered {
             // A click is no longer evidence of anything. The hijack listens for the
@@ -316,8 +321,10 @@ final class DownloadManager: NSObject, ObservableObject {
         if !canShowMIMEType { return .capture }
         if isAttachment { return .capture }
         // Below here is a guess about something WebKit COULD display, so it is scoped
-        // to sites we actually know.
-        guard fromKnownSource else { return .allow }
+        // to sites we actually know -- and to the main frame. A guess is a poor reason
+        // to take a file at all; it is no reason whatsoever when the thing making the
+        // request is a frame the page put there.
+        guard fromKnownSource, isForMainFrame else { return .allow }
         return kind(of: filename) != .unknown ? .capture : .allow
     }
 

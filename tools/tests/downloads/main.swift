@@ -193,10 +193,30 @@ print("Test 4g - a frame does not get to start a download")
 // response step with isForMainFrame false and becomes a WKDownload like any other --
 // and the page URL handed in is the MAIN page, so the frame's drop was judged against
 // an origin that had nothing to do with it.
-check("the frame check exists at all and refuses",
-      DownloadManager.shared.frameRefusal(isForMainFrame: false, fileURL: nil) != nil)
-check("the main frame is unaffected",
-      DownloadManager.shared.frameRefusal(isForMainFrame: true, fileURL: nil) == nil)
+func f(_ canShow: Bool, _ attach: Bool, _ mainFrame: Bool) -> DownloadManager.Disposition {
+    DownloadManager.disposition(canShowMIMEType: canShow, isAttachment: attach,
+                                filename: "thing.zip", fromKnownSource: true,
+                                fileFromTrustedHost: true, fileHost: "cdn.example",
+                                userInitiated: true, isForMainFrame: mainFrame)
+}
+check("a frame offering a FILE is refused", isRefusal(f(false, false, false)))
+check("the main frame offering the same file is taken", f(false, false, true) == .capture)
+// The order of these two checks is the bug that stranded every Cloudflare challenge.
+// Asked before "is this even a download", it cancelled every subframe response there
+// is -- so no iframe could load, including the one holding the challenge.
+check("A FRAME LOADING AN ORDINARY PAGE IS NEVER TOUCHED",
+      DownloadManager.disposition(canShowMIMEType: true, isAttachment: false,
+                                  filename: "challenge-platform", fromKnownSource: true,
+                                  fileFromTrustedHost: true, fileHost: "1337x.to",
+                                  userInitiated: false, isForMainFrame: false) == .allow,
+      "an iframe must be able to load HTML, or Cloudflare's challenge cannot appear")
+check("and a frame never triggers a capture by guessing at a filename",
+      f(true, false, false) == .allow, "\(f(true, false, false))")
+check("nor is a frame loading renderable content from anywhere",
+      DownloadManager.disposition(canShowMIMEType: true, isAttachment: false,
+                                  filename: "challenge", fromKnownSource: false,
+                                  fileFromTrustedHost: false, fileHost: "challenges.cloudflare.com",
+                                  userInitiated: false, isForMainFrame: false) == .allow)
 
 print("Test 5 - a colliding destination gets a fresh name")
 let dir = URL(fileURLWithPath: NSTemporaryDirectory())
