@@ -334,7 +334,16 @@ final class DownloadManager: NSObject, ObservableObject {
     func mayBeDownload(_ url: URL, pageURL: URL?) -> Bool {
         guard let pageURL, isKnownSource(pageURL) else { return false }
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
-        return true
+        // It has to look like a FILE.
+        //
+        // This used to answer yes to any http address opened from a page in the bar,
+        // and that answer is what let `window.open` through: the popup was dropped as
+        // designed, and then the URL was loaded into the main view instead, arriving
+        // as an ordinary navigation nobody had judged. It was the one redirect
+        // technique of twelve that still worked. A redirect advert points at a page;
+        // a download link points at a file, and only the second is followed.
+        let name = url.lastPathComponent
+        return Self.kind(of: name) != .unknown || url.pathExtension.lowercased() == "torrent"
     }
 
     /// Any site in the bar, or any mirror of one.

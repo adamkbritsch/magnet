@@ -623,6 +623,9 @@ extension WebController: WKUIDelegate {
         // the popunder defence intact -- nothing new is opened, and the response
         // still has to satisfy the download check to be captured. Deliberately not
         // handed to the default browser: on a tracker page that IS the ad behaviour.
+        // Followed in this view only when it is plainly a file. Anything else a popup
+        // asks for is dropped: on these sites `window.open` is the advert, and loading
+        // it here put it on screen without the redirect guard ever seeing it.
         if let url = navigationAction.request.url,
            DownloadManager.shared.mayBeDownload(url, pageURL: webView.url) {
             webView.load(URLRequest(url: url))

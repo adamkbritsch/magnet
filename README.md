@@ -326,6 +326,15 @@ The net effect: a hijack firing off your clicks produces neither a redirect nor 
 nothing at all — while a link you genuinely clicked asks once per domain and then
 remembers.
 
+**`window.open` was the one technique that still worked**, and it is worth recording
+how. The popup itself was dropped, as designed — and then its URL was loaded into the
+main view instead, arriving as an ordinary navigation nobody had judged. The gate was
+"could this be a download?", which answered yes to *any* http address opened from a
+page in the bar. A popup is now followed only when it points at a **file**; an advert
+points at a page. `tools/tests/run.sh` checks all twelve techniques against the real
+policy, and checks the other direction too, since a fix that broke "download link opens
+in a new tab" would be a different bug rather than a fix.
+
 ### Sites keep their own appearance
 
 There was a restyling engine here: five themes, one typeface and palette across every
