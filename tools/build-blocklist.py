@@ -67,10 +67,18 @@ RESOURCE_TYPES = {
     "xmlhttprequest": "raw",
     "subdocument": "document",
     "document": "document",
-    "ping": "raw",
     "websocket": "raw",
     "other": "raw",
 }
+
+# Types WebKit has no equivalent for, where the nearest match is far WIDER than the
+# original. `ping` means a beacon -- navigator.sendBeacon and <a ping> -- and the
+# closest WebKit type is `raw`, which is every XHR and fetch there is. So
+# `*$ping,third-party` (block third-party beacons) became "block ALL third-party XHR
+# on every site", which is most of the modern web and, specifically, the request
+# Cloudflare's challenge makes. One rule, and no site behind Cloudflare would load.
+# Widening a rule is not a translation; a rule that cannot be narrowed is dropped.
+UNEXPRESSIBLE_TYPES = {"ping", "beacon"}
 
 # Options that mean "this rule does something WebKit cannot express". Keeping the
 # rule anyway would change its meaning, so drop it.
@@ -287,6 +295,11 @@ def parse_options(optstr):
         if key in ("popup", "popunder"):
             resource_types.append("popup")
             continue
+        if key in UNEXPRESSIBLE_TYPES:
+            # Only a negation is safe to ignore: "not a beacon" does not widen anything.
+            if neg:
+                continue
+            return None, False
         if key in RESOURCE_TYPES:
             if not neg:
                 resource_types.append(RESOURCE_TYPES[key])
@@ -353,6 +366,12 @@ def convert_line(line):
             return None
 
     url_filter = pattern_to_url_filter(pattern)
+    # A block that matches everything, scoped to nothing, is never a real rule -- it is
+    # always a conversion that widened something. Refuse to emit one whatever produced
+    # it, because a single such rule silently disables an entire class of request for
+    # every site and nothing about the app's behaviour says so.
+    if not exception and url_filter in (".*", "^.*", ".") and "if-domain" not in trig_extra:
+        return None
     # Belt and braces for the whole class: an anchor somewhere WebKit will not accept.
     # Cheaper to drop one rule than to lose the 45,000 it is compiled alongside.
     if url_filter and has_stray_anchor(url_filter):
