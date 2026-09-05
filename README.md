@@ -284,6 +284,13 @@ that cost a debugging cycle each:
 - **`ignore-previous-rules` only cancels within the same compiled list**, so every block
   chunk must carry the full exception set or sites silently over-block.
 - uBO's cosmetic filters must be stripped before the network parser sees them.
+- **A type WebKit lacks must not be widened into one it has.** `$ping` means a beacon;
+  the nearest WebKit type is `raw`, which is every XHR and fetch. So `*$ping,third-party`
+  — block third-party beacons — became *block all third-party XHR on every site*, which
+  is most of the modern web and, specifically, the request a Cloudflare challenge makes.
+  One rule, and nothing behind Cloudflare would load. A rule that cannot be narrowed is
+  dropped, and the suite now fails on any block rule that matches everything and is
+  scoped to nothing.
 - **uBO lets a regex stand where a hostname goes** — in `$domain=` and before `##`.
   WebKit's `if-domain` takes hostnames only, so one passed through plants a `^` inside
   a domain pattern, which it rejects. Compilation is all-or-nothing, so **four such

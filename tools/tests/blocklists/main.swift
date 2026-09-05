@@ -26,6 +26,33 @@ if files.isEmpty {
     exit(0)
 }
 
+// A block that matches everything and is scoped to nothing.
+//
+// `*$ping,third-party` meant "block third-party beacons". WebKit has no beacon type,
+// the nearest is `raw`, and `raw` is every XHR and fetch there is -- so one rule became
+// "block ALL third-party XHR on every site". That is most of the modern web, and
+// specifically the request Cloudflare's challenge makes, so no protected site would
+// load. Nothing in the app said anything was wrong; the shield read "Blocking".
+print("No rule blocks everything")
+var universal: [String] = []
+for f in files {
+    let url = URL(fileURLWithPath: dir + "/" + f)
+    guard let data = try? Data(contentsOf: url),
+          let rules = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+    else { continue }
+    for rule in rules {
+        guard let action = rule["action"] as? [String: Any],
+              (action["type"] as? String) == "block",
+              let trigger = rule["trigger"] as? [String: Any],
+              let filter = trigger["url-filter"] as? String else { continue }
+        if [".*", "^.*", "."].contains(filter), trigger["if-domain"] == nil {
+            universal.append("\(f): \(trigger)")
+        }
+    }
+}
+check("no block rule matches every URL on every site", universal.isEmpty,
+      universal.prefix(3).joined(separator: " | "))
+
 MainActor.assumeIsolated {
     guard let store = WKContentRuleListStore.default() else {
         print("  SKIP  no rule list store on this machine"); exit(0)
