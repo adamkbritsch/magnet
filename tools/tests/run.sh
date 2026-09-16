@@ -35,6 +35,7 @@ fi
 # torrent client and the plugin catalogue are reached deliberately off-proxy.
 # WebKit's compiler is all-or-nothing: one malformed rule fails the whole list, and
 # the app swallows it. Half the blocking once vanished this way with no symptom.
+run qbsession  "$(dirname "$0")/qbsession/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift"
 run redirects  "$(dirname "$0")/redirects/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/Mirrors.swift" "$SRC/Routes.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Downloads.swift"
 run pagesafety "$(dirname "$0")/pagesafety/main.swift" "$SRC/Domains.swift" "$SRC/Banners.swift"
 run blocklists "$(dirname "$0")/blocklists/main.swift"

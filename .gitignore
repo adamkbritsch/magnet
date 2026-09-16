@@ -18,3 +18,4 @@ rollback.sh
 backup/
 
 .DS_Store
+.serena/
