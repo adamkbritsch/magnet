@@ -331,7 +331,8 @@ actor SearchPluginClient {
             req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             req.httpBody = Data(body.utf8)
         }
-        if let sid { req.setValue("SID=\(sid)", forHTTPHeaderField: "Cookie") }
+        // Under the name it arrived with; the cookie is QBT_SID_<port> now, not SID.
+        if let sid { req.setValue(sid, forHTTPHeaderField: "Cookie") }
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw Failure(message: "No response") }
@@ -350,12 +351,15 @@ actor SearchPluginClient {
                           ? "qBittorrent refused the request"
                           : detail)
         }
-        guard http.statusCode == 200 else {
+        // Any 2xx. installPlugin and enablePlugin answer 200, but the sign-in answers
+        // 204 and more of the API is moving that way.
+        guard QBSession.accepted(http.statusCode) else {
             throw Failure(message: "qBittorrent returned HTTP \(http.statusCode)")
         }
         return data
     }
 
+    /// Returns the `Cookie:` header value, name included -- see QBSession.
     private func login(base: URL, credentials: QBCredentials) async throws -> String {
         guard let url = URL(string: "api/v2/auth/login", relativeTo: base) else {
             throw Failure(message: "Bad qBittorrent URL")
@@ -367,18 +371,17 @@ actor SearchPluginClient {
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw Failure(message: "No response") }
-        guard http.statusCode == 200,
-              (String(data: data, encoding: .utf8) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Ok")
-        else { throw Failure(message: "qBittorrent rejected the sign-in") }
-
-        let fields = http.allHeaderFields.reduce(into: [String: String]()) { acc, kv in
-            if let k = kv.key as? String, let v = kv.value as? String { acc[k] = v }
+        guard QBSession.accepted(http.statusCode) else {
+            throw Failure(message: "qBittorrent rejected the sign-in (HTTP \(http.statusCode))")
         }
-        guard let s = HTTPCookie.cookies(withResponseHeaderFields: fields, for: base)
-            .first(where: { $0.name == "SID" })?.value
-        else { throw Failure(message: "No session cookie returned") }
-        return s
+        if (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("fail") {
+            throw Failure(message: "qBittorrent rejected the sign-in")
+        }
+        guard let cookie = QBSession.cookieHeader(from: http, base: base) else {
+            throw Failure(message: "No session cookie returned")
+        }
+        return cookie
     }
 
     private func esc(_ s: String) -> String {
