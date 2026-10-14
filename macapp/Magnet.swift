@@ -129,6 +129,77 @@ enum MagnetResult {
 ///
 /// Neither is worth hardcoding again. Any 2xx is a yes, the cookie is found by shape
 /// rather than by name, and its real name is carried with it.
+/// Records which torrent was chosen, and what was on screen when it was.
+///
+/// The pick on its own is a list of filenames. What makes it worth keeping is the
+/// page it was picked FROM: a search URL carries the query, so the pair reads as
+/// "looked for this, chose that" -- which is the shape anything learning to choose
+/// would need. The alternatives that were on the page and NOT chosen are not here;
+/// recovering those would mean scraping the results, which is a bigger thing than
+/// this and not worth doing silently.
+///
+/// Local file, append-only, never sent anywhere. Writing happens off the main thread
+/// and every failure is swallowed: a logger must not cost a torrent.
+enum ChoiceLog {
+    nonisolated(unsafe) private static var directory: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".claude/prompt-log", isDirectory: true)
+    }
+
+    /// The search terms, when the page is a search. Each site spells it differently,
+    /// so this reads the two shapes that actually occur: a `q`-style query parameter,
+    /// and a `/search/<terms>/` path segment.
+    nonisolated static func query(from page: URL?) -> String? {
+        guard let page else { return nil }
+        if let items = URLComponents(url: page, resolvingAgainstBaseURL: false)?.queryItems {
+            for key in ["q", "query", "search", "s", "keywords"] {
+                if let v = items.first(where: { $0.name.lowercased() == key })?.value,
+                   !v.isEmpty { return v }
+            }
+        }
+        let parts = page.pathComponents.filter { $0 != "/" }
+        if let i = parts.firstIndex(where: { ["search", "srch", "find"].contains($0.lowercased()) }),
+           i + 1 < parts.count {
+            let term = parts[i + 1]
+            // 1337x puts the page number after the terms; a bare number is not a query.
+            if !term.isEmpty, Int(term) == nil {
+                return term.replacingOccurrences(of: "+", with: " ")
+                    .replacingOccurrences(of: "%20", with: " ")
+            }
+        }
+        return nil
+    }
+
+    nonisolated static func record(choice url: URL, page: URL?) {
+        let entry: [String: Any] = [
+            "at": ISO8601DateFormatter().string(from: Date()),
+            "name": MagnetSender.displayName(for: url),
+            "hash": MagnetSender.infoHash(for: url) ?? "",
+            "kind": url.scheme?.lowercased() == "magnet" ? "magnet" : "torrent-file",
+            "page": page?.absoluteString ?? "",
+            "site": page?.host.map(registrableDomain) ?? "",
+            "query": query(from: page) ?? "",
+        ]
+        // Off the main thread: this is a disk write on the path of a click.
+        DispatchQueue.global(qos: .utility).async {
+            guard let data = try? JSONSerialization.data(withJSONObject: entry,
+                                                         options: [.sortedKeys]),
+                  var line = String(data: data, encoding: .utf8) else { return }
+            line += "\n"
+            let dir = directory
+            let file = dir.appendingPathComponent("torrent-choices.jsonl")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let handle = try? FileHandle(forWritingTo: file) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: Data(line.utf8))
+            } else {
+                try? Data(line.utf8).write(to: file)
+            }
+        }
+    }
+}
+
 enum QBSession {
     /// The `Cookie:` header value to send back, e.g. `QBT_SID_8080=abc123`.
     static func cookieHeader(from http: HTTPURLResponse, base: URL) -> String? {
@@ -260,6 +331,21 @@ actor MagnetSender {
     /// client could do with it. Decoy links among the real ones are the reason to
     /// check: the scheme is trivial to forge, the app hands anything using it straight
     /// to the torrent client, and a client is a poor place to discover the difference.
+    /// The info hash, which is the only part of a magnet that names the torrent --
+    /// `dn` is a label the page chose and the trackers are incidental.
+    ///
+    /// Parsed here rather than borrowed from RedirectGuard: this file would otherwise
+    /// drag the navigation guard, and WebKit behind it, into every test suite that
+    /// touches sending a torrent.
+    nonisolated static func infoHash(for url: URL) -> String? {
+        guard url.scheme?.lowercased() == "magnet" else { return nil }
+        let raw = url.absoluteString.lowercased()
+        guard let mark = raw.range(of: "xt=urn:bt") else { return nil }
+        let rest = raw[mark.upperBound...]
+        let hash = rest.drop(while: { $0 != ":" }).dropFirst().prefix(while: { $0 != "&" })
+        return hash.isEmpty ? nil : String(hash)
+    }
+
     nonisolated static func isValidMagnet(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "magnet" else { return false }
         // `URLComponents` will not parse a magnet's query on its own, since the part

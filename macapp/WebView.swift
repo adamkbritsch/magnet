@@ -259,6 +259,10 @@ final class WebController: NSObject, ObservableObject {
             showToast("That link is not a real magnet — nothing was sent.", isError: true)
             return
         }
+        // Recorded at the moment of choosing, with the page it was chosen from --
+        // before the client is consulted, because the choice was made either way and
+        // whether qBittorrent happened to be reachable says nothing about it.
+        ChoiceLog.record(choice: url, page: webView.url)
         let name = MagnetSender.displayName(for: url)
         showToast("Sending \(name)…", isError: false)
         guard let base = qbBase else {
