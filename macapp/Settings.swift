@@ -98,6 +98,21 @@ final class AppSettings: ObservableObject {
     var qbBase: URL? { URL(string: qbBaseURL.trimmingCharacters(in: .whitespaces)) }
     var qbConfigured: Bool { qbBase != nil }
 
+    // MARK: Automatic downloads
+
+    /// The NAS service behind Automatic mode (nas/automatic), e.g. http://nas:8790.
+    /// Empty by default: until it is set, Automatic mode shows how to set it up.
+    @Published var automaticServer: String { didSet { put("automatic.server", automaticServer) } }
+    /// Which side of the app is showing: "manual" (the browser) or "automatic".
+    @Published var mode: String { didSet { put("ui.mode", mode) } }
+
+    var automaticBase: URL? {
+        let s = automaticServer.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty, let url = URL(string: s), url.host != nil else { return nil }
+        return url
+    }
+    var isAutomatic: Bool { mode == "automatic" }
+
     // MARK: Download archive
 
     @Published var nasHost: String { didSet { put("nas.host", nasHost) } }
@@ -182,6 +197,9 @@ final class AppSettings: ObservableObject {
         qbKeychainService = d.string(forKey: "qb.keychainService")
             ?? "\(AppSettings.bundleID).qbittorrent"
 
+        automaticServer = d.string(forKey: "automatic.server") ?? ""
+        mode = d.string(forKey: "ui.mode") == "automatic" ? "automatic" : "manual"
+
         nasHost = d.string(forKey: "nas.host") ?? ""
         nasShare = d.string(forKey: "nas.share") ?? ""
         nasUser = d.string(forKey: "nas.user") ?? ""
@@ -222,6 +240,7 @@ final class AppSettings: ObservableObject {
                     "proxy.host", "proxy.port", "proxy.keychainService",
                     "qb.baseURL", "qb.keychainService", "qb.syncPlugins",
                     "qb.plugins.signature", "qb.plugins.failed",
+                    "automatic.server", "ui.mode", "automatic.sources.signature",
                     "nas.host", "nas.share", "nas.user", "archive.root",
                     "archive.localPath", "archive.folders", "downloads.allowedHosts",
                     "mirrors.curated", "mirrors.fmhy.enabled", "mirrors.refreshHours",
@@ -261,6 +280,13 @@ enum Config {
     static var proxyPort: UInt16 {
         let stored = d.integer(forKey: "proxy.port")
         return stored > 0 && stored <= 65535 ? UInt16(stored) : 8888
+    }
+
+    /// The NAS service behind Automatic mode, for the off-main client.
+    static var automaticBase: URL? {
+        let s = string("automatic.server")
+        guard !s.isEmpty, let url = URL(string: s), url.host != nil else { return nil }
+        return url
     }
 
     static var nasHost: String { string("nas.host") }

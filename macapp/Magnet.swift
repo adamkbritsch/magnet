@@ -198,6 +198,24 @@ enum ChoiceLog {
             }
         }
     }
+
+    /// The names of the most recent picks, newest first and without repeats. Automatic
+    /// mode turns these into "you have been picking this show" suggestions; only the
+    /// names are used, never the pages they came from.
+    nonisolated static func recentNames(limit: Int = 60) -> [String] {
+        let file = directory.appendingPathComponent("torrent-choices.jsonl")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return [] }
+        var seen = Set<String>()
+        var out: [String] = []
+        for line in text.split(separator: "\n").reversed() {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let name = obj["name"] as? String, !name.isEmpty, name != "torrent",
+                  seen.insert(name).inserted else { continue }
+            out.append(name)
+            if out.count >= limit { break }
+        }
+        return out
+    }
 }
 
 enum QBSession {

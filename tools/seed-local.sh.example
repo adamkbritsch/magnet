@@ -41,6 +41,10 @@ set_default "proxy.port" -int 8893
 # qBittorrent Web API, via the NAS reverse proxy rather than the seedbox directly.
 set_default "qb.baseURL" -string "http://192.168.1.10:8890/"
 
+# Automatic mode: the NAS service in nas/automatic. Its API token is a file, written by
+# nas/automatic/deploy.sh --token, not a setting.
+set_default "automatic.server" -string "http://192.168.1.10:8790"
+
 # Keychain services. Named explicitly because the qBittorrent credential is SHARED
 # with the separate qBittorrent app -- deriving it from this bundle id would break
 # that and prompt for a password again.

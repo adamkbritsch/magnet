@@ -1,0 +1,4 @@
+Sonarr custom formats from TRaSH Guides (https://github.com/TRaSH-Guides/Guides,
+docs/json/sonarr/cf), MIT licence (see LICENSE in this folder). Snapshot of commit 9b06d40e142f 2026-09-21.
+The regexes are theirs; the scores Magnet uses are in ../setup_sonarr.py, not these files.
+Refresh with: python3 ../setup_sonarr.py --refresh-formats

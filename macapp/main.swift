@@ -98,6 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let viewItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Manual", action: #selector(showManual), keyEquivalent: "1").target = self
+        viewMenu.addItem(withTitle: "Automatic", action: #selector(showAutomatic), keyEquivalent: "2").target = self
+        viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Home", action: #selector(goHome), keyEquivalent: "H").target = self
         viewMenu.addItem(withTitle: "Back", action: #selector(goBack), keyEquivalent: "[").target = self
         viewMenu.addItem(withTitle: "Reload", action: #selector(reload), keyEquivalent: "r").target = self
@@ -126,4 +129,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func goBack() { NotificationCenter.default.post(name: .qbBack, object: nil) }
     @objc private func reload() { NotificationCenter.default.post(name: .qbReload, object: nil) }
     @objc private func recheck() { NotificationCenter.default.post(name: .qbRecheck, object: nil) }
+    @objc private func showManual() { NotificationCenter.default.post(name: .qbModeManual, object: nil) }
+    @objc private func showAutomatic() { NotificationCenter.default.post(name: .qbModeAutomatic, object: nil) }
 }

@@ -6,6 +6,17 @@ struct Bookmark: Identifiable, Equatable {
     let url: URL
     var id: String { url.absoluteString }
 
+    static let homeTitle = "Home"
+
+    /// The sites the app treats as its sources: the visible chips, plus the home site
+    /// when no chip already points at it. The home chip is usually hidden because the
+    /// Home button goes there, yet it is the site used most of all. One definition,
+    /// used by search-plugin sync, the Torrent Client tab and Automatic mode alike.
+    static func withHome(_ visible: [Bookmark], home: URL?) -> [Bookmark] {
+        guard let home, !visible.contains(where: { $0.url.host == home.host }) else { return visible }
+        return [Bookmark(title: homeTitle, url: home)] + visible
+    }
+
     /// Short label for a chip. Page titles range from "DODI Repacks" to a
     /// paragraph-long FitGirl anti-scam notice, so this picks the most
     /// name-like fragment rather than trusting the title wholesale.

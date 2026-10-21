@@ -7,9 +7,13 @@ struct RootView: View {
     @StateObject private var bookmarks = BookmarkStore()
     @StateObject private var blocker = ContentBlocker()
     @StateObject private var plugins = SearchPluginSync()
+    @StateObject private var automatic = AutomaticModel()
+    @StateObject private var sources = AutoSourceSync()
     @State private var generation = 0
     @ObservedObject private var settings = AppSettings.shared
     @State private var showSettings = false
+    /// The tab Settings opens on; Automatic mode's own "Settings..." asks for its tab.
+    @State private var settingsTab: SettingsTab = .sites
     @State private var started = false
     /// The domain actually opened, which may be a mirror of the configured home.
     @State private var homeURL: URL?
@@ -17,20 +21,45 @@ struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar(routes: routes, web: web, bookmarks: bookmarks,
-                   blocker: blocker, showSettings: $showSettings, onHome: goHome)
+                   blocker: blocker, settings: settings, automatic: automatic,
+                   showSettings: $showSettings, onHome: { settings.mode = "manual"; goHome() })
             Divider().overlay(Theme.hairline)
-            content
+            // The browser stays mounted while Automatic mode is showing, so its page,
+            // history and scroll position are exactly where they were on the way back.
+            ZStack {
+                content
+                    .opacity(settings.isAutomatic ? 0 : 1)
+                    .allowsHitTesting(!settings.isAutomatic)
+                    .accessibilityHidden(settings.isAutomatic)
+                    // Hidden is not enough: its default buttons would still answer Return.
+                    .disabled(settings.isAutomatic)
+                if settings.isAutomatic {
+                    AutomaticView(model: automatic, settings: settings) {
+                        settingsTab = .automatic
+                        showSettings = true
+                    }
+                }
+            }
+            .overlay(alignment: .bottom) { toastView }
+            .animation(.easeInOut(duration: 0.2), value: web.toast)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $showSettings) {
+        .sheet(isPresented: $showSettings, onDismiss: {
+            settingsTab = .sites
+            if settings.isAutomatic { NSApp.mainWindow?.makeFirstResponder(nil) }
+        }) {
             SettingsPane(routes: routes, bookmarks: bookmarks, blocker: blocker,
-                         plugins: plugins)
+                         plugins: plugins, automatic: automatic, sources: sources,
+                         syncSources: syncSources, initialTab: settingsTab)
         }
         .task {
             guard !started else { return }
             started = true
             web.onLoadFailure = { _ in }
             bookmarks.start()
+            // After the bar is read, never before: sent earlier, the list would hold only
+            // the hand-added sites, and the NAS would stop searching all the others.
+            syncSources()
             DownloadManager.shared.onMessage = { text, isError in
                 web.showToast(text, isError: isError)
             }
@@ -61,10 +90,18 @@ struct RootView: View {
         .onChange(of: routes.status) { _, new in
             if case .live = new { applyRoute() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .qbHome)) { _ in goHome() }
-        .onReceive(NotificationCenter.default.publisher(for: .qbBack)) { _ in web.goBack() }
+        // Home always means the browser's home page; Back and Reload act on whichever
+        // side is showing, so Cmd-R in Automatic mode never reloads a hidden page.
+        .onReceive(NotificationCenter.default.publisher(for: .qbHome)) { _ in
+            settings.mode = "manual"
+            goHome()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .qbBack)) { _ in
+            if !settings.isAutomatic { web.goBack() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .qbReload)) { _ in
-            web.isLoading ? web.stop() : web.reload()
+            if settings.isAutomatic { Task { await automatic.refresh() } }
+            else if web.isLoading { web.stop() } else { web.reload() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .qbSettings)) { _ in showSettings = true }
         .onReceive(NotificationCenter.default.publisher(for: .qbRecheck)) { _ in
@@ -80,6 +117,8 @@ struct RootView: View {
         .onChange(of: settings.siteZoom) { _, _ in web.applyZoom() }
         .modifier(PluginSyncTriggers(bookmarks: bookmarks, settings: settings,
                                      sync: syncPlugins))
+        .modifier(AutomaticTriggers(bookmarks: bookmarks, settings: settings,
+                                    automatic: automatic, sources: sources, syncSources: syncSources))
     }
 
     @ViewBuilder
@@ -116,22 +155,26 @@ struct RootView: View {
                 }
                 }
             }
-
-            if let toast = web.toast {
-                Text(toast)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14).padding(.vertical, 9)
-                    .background(
-                        Capsule().fill(web.toastIsError
-                                       ? Color(nsColor: .systemRed)
-                                       : Color(nsColor: .systemGreen))
-                    )
-                    .padding(.bottom, 22)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
         }
-        .animation(.easeInOut(duration: 0.2), value: web.toast)
+    }
+
+    /// Downloads and mirror moves report here in either mode, so a download that ends
+    /// while Automatic is showing is still heard about.
+    @ViewBuilder
+    private var toastView: some View {
+        if let toast = web.toast {
+            Text(toast)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .background(
+                    Capsule().fill(web.toastIsError
+                                   ? Color(nsColor: .systemRed)
+                                   : Color(nsColor: .systemGreen))
+                )
+                .padding(.bottom, 22)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 
     /// Settles on a domain before probing, so a dead home domain reads as "use a
@@ -164,13 +207,15 @@ struct RootView: View {
     private func goHome() { if let homeURL { web.load(homeURL) } }
 
     private func syncPlugins() {
-        // The home site counts. Its chip is usually hidden because the Home button
-        // already goes there, and it is the site used most of all.
-        var sites = bookmarks.visible.map(\.url)
-        if let home = settings.home, !sites.contains(where: { $0.host == home.host }) {
-            sites.insert(home, at: 0)
-        }
+        let sites = Bookmark.withHome(bookmarks.visible, home: settings.home).map(\.url)
         plugins.syncIfNeeded(sites: sites, alsoKnownAs: Self.mirrorDomains)
+    }
+
+    /// The bar's sites become the places Automatic mode searches for new episodes.
+    private func syncSources() {
+        let local = AutoSources.sites(from: bookmarks.visible, home: settings.home)
+        sources.reconcile(remote: automatic.overview?.sources?.sites ?? sources.status?.sites, local: local)
+        sources.syncIfNeeded(local)
     }
 
     /// Every domain a site is also known by, so a chip saved at last month's mirror
@@ -178,6 +223,57 @@ struct RootView: View {
     static func mirrorDomains(_ url: URL) -> [String] {
         guard let set = MirrorDirectory.shared.set(owning: url) else { return [] }
         return set.candidates.compactMap(\.host)
+    }
+}
+
+/// Automatic mode's side effects, kept out of the root view's modifier chain for the
+/// same type-checker reason as PluginSyncTriggers.
+///
+/// - Polls the NAS only while Automatic mode is on screen.
+/// - Sends the bar's sites to the NAS at launch and whenever they, the home site or
+///   the NAS address change: adding a site to the bar is how a source is added.
+/// - Takes the keyboard away from the hidden web view, which would otherwise keep
+///   receiving keystrokes while Automatic mode is showing.
+private struct AutomaticTriggers: ViewModifier {
+    @ObservedObject var bookmarks: BookmarkStore
+    @ObservedObject var settings: AppSettings
+    @ObservedObject var automatic: AutomaticModel
+    let sources: AutoSourceSync
+    let syncSources: () -> Void
+    @State private var addressSettle: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { automatic.setActive(settings.isAutomatic) }
+            .onChange(of: settings.mode) { _, _ in
+                automatic.setActive(settings.isAutomatic)
+                // The main window, not the key one: with Settings open the key window is
+                // the sheet, and the hidden web view would keep the keyboard.
+                if settings.isAutomatic { (NSApp.mainWindow ?? NSApp.keyWindow)?.makeFirstResponder(nil) }
+            }
+            .onChange(of: bookmarks.visible.map(\.id)) { _, _ in syncSources() }
+            .onChange(of: settings.homeURL) { _, _ in syncSources() }
+            // Typed a character at a time: act once the address has settled.
+            .onChange(of: settings.automaticServer) { _, value in
+                addressSettle?.cancel()
+                addressSettle = Task {
+                    try? await Task.sleep(for: .milliseconds(800))
+                    guard !Task.isCancelled, settings.automaticServer == value else { return }
+                    sources.serverChanged()
+                    syncSources()
+                    await automatic.refresh()
+                }
+            }
+            // The NAS reports the list it holds; a mismatch (it lost it) is resent.
+            .onChange(of: automatic.overview?.sources?.sites.map(\.name)) { _, _ in syncSources() }
+            // Minimized, hidden, on another Space or covered: no polling.
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) { _ in
+                automatic.setVisible(NSApp.windows.contains {
+                    $0.isVisible && !$0.isSheet && $0.occlusionState.contains(.visible)
+                })
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .qbModeManual)) { _ in settings.mode = "manual" }
+            .onReceive(NotificationCenter.default.publisher(for: .qbModeAutomatic)) { _ in settings.mode = "automatic" }
     }
 }
 
@@ -207,6 +303,8 @@ private struct TopBar: View {
     @ObservedObject var web: WebController
     @ObservedObject var bookmarks: BookmarkStore
     @ObservedObject var blocker: ContentBlocker
+    @ObservedObject var settings: AppSettings
+    @ObservedObject var automatic: AutomaticModel
     @Binding var showSettings: Bool
     let onHome: () -> Void
 
@@ -232,9 +330,11 @@ private struct TopBar: View {
                 HStack(spacing: 10) {
                     Color.clear.frame(width: Theme.trafficLightGutter, height: 1)
 
-                    ChromeButton(symbol: "chevron.left", help: "Back") { web.goBack() }
-                        .opacity(web.canGoBack ? 1 : 0.3)
-                        .disabled(!web.canGoBack)
+                    if !settings.isAutomatic {
+                        ChromeButton(symbol: "chevron.left", help: "Back") { web.goBack() }
+                            .opacity(web.canGoBack ? 1 : 0.3)
+                            .disabled(!web.canGoBack)
+                    }
 
                     Button(action: onHome) {
                         HStack(spacing: 6) {
@@ -256,7 +356,7 @@ private struct TopBar: View {
                     .contextMenu {
                         if let home = AppSettings.shared.home {
                             InstanceMenuItems(url: home,
-                                              open: { web.load($0) },
+                                              open: { settings.mode = "manual"; web.load($0) },
                                               report: { web.showToast($0, isError: $1) })
                             Button("Copy Address") {
                                 NSPasteboard.general.clearContents()
@@ -266,12 +366,30 @@ private struct TopBar: View {
                             }
                             Divider()
                         }
-                        Button("Reload") { web.reload() }
+                        Button("Reload") { settings.mode = "manual"; web.reload() }
                         Button("Settings\u{2026}") { showSettings = true }
                     }
 
+                    // Manual is the browser; Automatic is new episodes arriving on their
+                    // own. The same window, the same sites: the bar's sites are where
+                    // Automatic mode searches.
+                    Picker("Mode", selection: $settings.mode) {
+                        Text("Manual").tag("manual")
+                        Text("Automatic").tag("automatic")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 168)
+                    .help("Manual: browse and pick (\u{2318}1). Automatic: new episodes of the shows you follow (\u{2318}2).")
+
                     Spacer(minLength: 8)
 
+                    if settings.isAutomatic {
+                        ChromeButton(symbol: "arrow.clockwise", help: "Refresh") {
+                            Task { await automatic.refresh() }
+                        }
+                    } else {
                     ShieldPill(blocker: blocker)
                     RoutePill(routes: routes, showSettings: $showSettings)
                     // The way out. Everything here goes through the NAS, so when a
@@ -286,6 +404,7 @@ private struct TopBar: View {
                                  help: web.isLoading ? "Stop" : "Reload") {
                         web.isLoading ? web.stop() : web.reload()
                     }
+                    }
                     // Settings used to be reachable only from the route pill's menu
                     // and Cmd-comma, which is no way to find a seven-tab pane.
                     ChromeButton(symbol: "gearshape", help: "Settings") {
@@ -295,7 +414,7 @@ private struct TopBar: View {
                 .padding(.horizontal, 12)
                 .frame(height: Theme.barHeight)
 
-                if web.isLoading {
+                if web.isLoading && !settings.isAutomatic {
                     GeometryReader { geo in
                         Rectangle().fill(Color.accentColor)
                             .frame(width: geo.size.width * max(0.02, web.progress), height: 2)
@@ -305,7 +424,9 @@ private struct TopBar: View {
             }
             .frame(height: Theme.barHeight)
 
-            BookmarkBar(bookmarks: bookmarks, web: web)
+            if !settings.isAutomatic {
+                BookmarkBar(bookmarks: bookmarks, web: web)
+            }
         }
         .animation(.easeInOut(duration: 0.18), value: web.isLoading)
     }
@@ -692,8 +813,8 @@ private struct SetupView: View {
 
 // MARK: - Settings
 
-private enum SettingsTab: String, CaseIterable, Identifiable {
-    case sites, connection, client, downloads, mirrors, appearance, blocking, about
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case sites, connection, client, automatic, downloads, mirrors, appearance, blocking, about
     var id: String { rawValue }
 
     var title: String {
@@ -701,6 +822,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .sites: return "Sites"
         case .connection: return "Connection"
         case .client: return "Torrent Client"
+        case .automatic: return "Automatic"
         case .downloads: return "Downloads"
         case .mirrors: return "Mirrors"
         case .appearance: return "Appearance"
@@ -714,6 +836,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .sites: return "globe"
         case .connection: return "network"
         case .client: return "arrow.down.circle"
+        case .automatic: return "tv"
         case .downloads: return "internaldrive"
         case .mirrors: return "arrow.triangle.branch"
         case .appearance: return "paintbrush"
@@ -760,9 +883,25 @@ struct SettingsPane: View {
     @ObservedObject var bookmarks: BookmarkStore
     @ObservedObject var blocker: ContentBlocker
     @ObservedObject var plugins: SearchPluginSync
+    @ObservedObject var automatic: AutomaticModel
+    @ObservedObject var sources: AutoSourceSync
+    let syncSources: () -> Void
     @ObservedObject private var settings = AppSettings.shared
     @Environment(\.dismiss) private var dismiss
-    @State private var tab: SettingsTab = .sites
+    @State private var tab: SettingsTab
+
+    init(routes: RouteStore, bookmarks: BookmarkStore, blocker: ContentBlocker,
+                     plugins: SearchPluginSync, automatic: AutomaticModel, sources: AutoSourceSync,
+                     syncSources: @escaping () -> Void, initialTab: SettingsTab = .sites) {
+        self.routes = routes
+        self.bookmarks = bookmarks
+        self.blocker = blocker
+        self.plugins = plugins
+        self.automatic = automatic
+        self.sources = sources
+        self.syncSources = syncSources
+        _tab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -776,6 +915,10 @@ struct SettingsPane: View {
                 ClientTab(settings: settings, plugins: plugins, bookmarks: bookmarks)
                     .tabItem { Label(SettingsTab.client.title, systemImage: SettingsTab.client.symbol) }
                     .tag(SettingsTab.client)
+                AutomaticTab(settings: settings, automatic: automatic, sources: sources,
+                             bookmarks: bookmarks, syncSources: syncSources)
+                    .tabItem { Label(SettingsTab.automatic.title, systemImage: SettingsTab.automatic.symbol) }
+                    .tag(SettingsTab.automatic)
                 DownloadsTab(settings: settings)
                     .tabItem { Label(SettingsTab.downloads.title, systemImage: SettingsTab.downloads.symbol) }
                     .tag(SettingsTab.downloads)
@@ -809,7 +952,193 @@ struct SettingsPane: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
         }
-        .frame(width: 620, height: 580)
+        // Wide enough for every tab's full name: at 620 the nine labels clipped to
+        // "Conne\u{2026}" and "Autom\u{2026}". Still narrower than the smallest window.
+        .frame(width: 840, height: 580)
+    }
+}
+
+// MARK: Automatic
+
+private struct AutomaticTab: View {
+    @ObservedObject var settings: AppSettings
+    @ObservedObject var automatic: AutomaticModel
+    @ObservedObject var sources: AutoSourceSync
+    @ObservedObject var bookmarks: BookmarkStore
+    let syncSources: () -> Void
+    @State private var editingToken = false
+    @State private var tokenDraft = ""
+    @State private var tokenError: String?
+    @State private var hasToken = AutoToken.value != nil
+    @State private var sending = false
+    @State private var sendResult: (ok: Bool, text: String)?
+
+    private var localSites: [AutoSite] {
+        AutoSources.sites(from: bookmarks.visible, home: settings.home)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                SettingRow(label: "NAS service",
+                           hint: "Where nas/automatic answers, such as http://192.168.1.10:8790. A plain-http host also has to be listed in MAGNET_HTTP_HOSTS when Magnet is built.") {
+                    MonoField(placeholder: "http://nas.local:8790", text: $settings.automaticServer)
+                }
+
+                SettingRow(label: "API token",
+                           hint: "nas/automatic/deploy.sh --token puts it here for you. Kept in a file only this account can read, not in the Keychain, so no permission prompt ever interrupts a poll.") {
+                    HStack(spacing: 8) {
+                        Text(hasToken ? "Saved" : "Not set")
+                            .font(.system(size: 12))
+                            .foregroundStyle(hasToken ? Color.secondary : Color(nsColor: .systemOrange))
+                        Button(hasToken ? "Replace\u{2026}" : "Set\u{2026}") { tokenDraft = ""; editingToken = true }
+                    }
+                }
+
+                if AutoClient.current() != nil {
+                    SettingRow(label: "Seedbox sign-in on the NAS",
+                               hint: "Sends the qBittorrent sign-in Magnet already uses for magnets. It is checked against the seedbox once and then kept only on the NAS. A refused sign-in is never retried by itself, so a wrong password cannot get the NAS's address banned.") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                loginStatus
+                                if QBCredentialStore.exists() {
+                                    Button(automatic.health?.seedboxLogin == true ? "Send Again" : "Send Magnet's Sign-In") { send() }
+                                        .disabled(sending)
+                                }
+                                if sending { ProgressView().controlSize(.small) }
+                            }
+                            if let r = sendResult {
+                                Text(r.text).font(.system(size: 10.5))
+                                    .foregroundStyle(r.ok ? Color(nsColor: .systemGreen) : Color(nsColor: .systemRed))
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+
+                SettingRow(label: "Where it searches",
+                           hint: "The sites in the bar decide it, the home site included. Each one is matched to an indexer that can search TV, and only those are searched for new episodes. Add a site to the bar and it is searched; hide or remove it and it stops.") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            if AutoClient.current() != nil {
+                                if sources.busy {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Button("Send Sites Now") { syncNowFromHere() }
+                                }
+                            }
+                            Text(statusLine).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                        }
+                        coverageList
+                    }
+                }
+            }
+            .padding(18)
+        }
+        .sheet(isPresented: $editingToken) { tokenSheet }
+        .task {
+            await automatic.refresh()
+            await sources.refresh()
+            // The NAS applies a new list when Prowlarr is awake, which can be minutes
+            // away; keep the list honest while the tab is open.
+            while !Task.isCancelled, sources.status?.pending ?? false {
+                try? await Task.sleep(for: .seconds(5))
+                await sources.refresh()
+            }
+        }
+    }
+
+    @ViewBuilder private var loginStatus: some View {
+        if let h = automatic.health {
+            if h.seedboxBlocked {
+                Text(h.seedboxError ?? "The seedbox refused it").font(.system(size: 12)).foregroundStyle(Color(nsColor: .systemRed))
+            } else if h.seedboxLogin {
+                Text("On the NAS").font(.system(size: 12)).foregroundStyle(.secondary)
+            } else {
+                Text("Not sent yet").font(.system(size: 12)).foregroundStyle(Color(nsColor: .systemOrange))
+            }
+        } else {
+            Text(automatic.error ?? "Checking\u{2026}").font(.system(size: 12)).foregroundStyle(.secondary)
+        }
+    }
+
+    private var statusLine: String {
+        if !sources.message.isEmpty { return sources.message }
+        guard let st = sources.status else { return AutoClient.current() == nil ? "Set the NAS service and token first." : "" }
+        if let err = st.error, !err.isEmpty, st.pending { return err }
+        if st.pending { return "Sent; the NAS applies it when Prowlarr is awake." }
+        if let at = st.appliedAt.flatMap(AutoDate.parse) {
+            return "Applied \(at.formatted(.relative(presentation: .named)))."
+        }
+        return ""
+    }
+
+    @ViewBuilder private var coverageList: some View {
+        let coverage = sources.status?.coverage ?? []
+        let sent = Set((sources.status?.sites ?? []).map(\.name))
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(localSites, id: \.name) { site in
+                let row = coverage.first { $0.site == site.name }
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(row?.searched == true ? Color(nsColor: .systemGreen)
+                              : (row == nil ? Color.secondary.opacity(0.4) : Color.secondary.opacity(0.25)))
+                        .frame(width: 6, height: 6)
+                    Text(site.name).font(.system(size: 11.5, weight: .medium)).frame(width: 150, alignment: .leading)
+                    Text(row?.explanation ?? (sent.contains(site.name) ? "Waiting for the NAS" : "Not sent yet"))
+                        .font(.system(size: 11)).foregroundStyle(row?.searched == true ? .primary : .secondary)
+                        .lineLimit(1).truncationMode(.tail)
+                }
+            }
+        }
+    }
+
+    private var tokenSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("API token").font(.system(size: 13, weight: .semibold))
+            Text("API_TOKEN from the service's .env on the NAS.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            SecureField("Token", text: $tokenDraft).textFieldStyle(.roundedBorder)
+            if let tokenError {
+                Text(tokenError).font(.system(size: 10.5)).foregroundStyle(Color(nsColor: .systemRed))
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { editingToken = false }.keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    do {
+                        try AutoToken.save(tokenDraft)
+                        hasToken = AutoToken.value != nil
+                        sources.serverChanged()
+                        tokenDraft = ""
+                        editingToken = false
+                        syncSources()
+                        Task { await automatic.refresh(); await sources.refresh() }
+                    } catch {
+                        tokenError = error.localizedDescription
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(tokenDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+    }
+
+    private func send() {
+        sending = true
+        sendResult = nil
+        Task {
+            let err = await automatic.sendSeedboxLogin()
+            sending = false
+            sendResult = err.map { (false, $0) } ?? (true, "Sent. The seedbox accepted it.")
+        }
+    }
+
+    private func syncNowFromHere() {
+        sources.syncNow(localSites)
     }
 }
 
@@ -1022,11 +1351,7 @@ private struct ClientTab: View {
     /// before anything is installed rather than only after a sync has run.
     /// Exactly what a sync would act on, so the list below and the button agree.
     private var syncedSites: [URL] {
-        var sites = bookmarks.visible.map(\.url)
-        if let home = settings.home, !sites.contains(where: { $0.host == home.host }) {
-            sites.insert(home, at: 0)
-        }
-        return sites
+        Bookmark.withHome(bookmarks.visible, home: settings.home).map(\.url)
     }
 
     private var coverage: [(site: String, plugin: String?)] {

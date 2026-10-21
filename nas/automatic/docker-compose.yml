@@ -1,0 +1,34 @@
+# Magnet's automatic side: the qBittorrent gate Sonarr uses, and the API Magnet's
+# Automatic mode talks to. Every machine-specific value comes from .env (created by
+# deploy.sh from site.env plus freshly generated secrets; never committed).
+services:
+  automatic:
+    image: python:3.12-alpine
+    container_name: magnet-automatic
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    working_dir: /app
+    command: ["python", "-u", "-m", "automatic"]
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      API_PORT: "8790"                 # inside the container; publish elsewhere with API_HOST_PORT
+      GATE_PORT: "8791"
+      SONARR_CONFIG: /sonarr/config.xml
+      PROWLARR_CONFIG: /prowlarr/config.xml
+      PLEX_PREFS: /plex/Preferences.xml
+    volumes:
+      - ./app:/app:ro
+      - "${AUTOMATIC_DATA:?set AUTOMATIC_DATA in .env}:/data"
+      - "${SONARR_CONFIG_FILE:?set SONARR_CONFIG_FILE in .env}:/sonarr/config.xml:ro"
+      - "${PROWLARR_CONFIG_FILE:-/dev/null}:/prowlarr/config.xml:ro"
+      - "${PLEX_PREFERENCES_FILE:-/dev/null}:/plex/Preferences.xml:ro"
+    ports:
+      - "${API_HOST_PORT:-8790}:8790"   # Magnet's Automatic mode; token required
+      - "172.17.0.1:8791:8791"       # the gate, reachable only from containers (Sonarr)
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/healthz', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3

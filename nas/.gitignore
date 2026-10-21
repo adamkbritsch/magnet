@@ -1,2 +1,6 @@
 fwd/tinyproxy.conf
 fwd/.env
+automatic/.env
+automatic/site.env
+# Sonarr snapshots, if a run ever writes them beside the script
+automatic/rollback/

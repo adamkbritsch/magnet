@@ -18,6 +18,11 @@ goes straight to your client without a round trip through another app, a direct
 download has to be approved before it can touch the disk, and adding a site to the bar
 installs that site's search plugin into qBittorrent.
 
+It has two sides. **Manual** is the browser: you look, and you pick. **Automatic**
+follows the TV shows you choose and, when a new episode airs, finds it on those same
+sites, reads what the release actually contains, and downloads it to your seedbox with
+no browser involved. The sites in the bar are the sites it searches.
+
 It ships with **nothing configured** — no sites, no home page, no services. All of it
 is set up in Settings.
 
@@ -76,12 +81,16 @@ magnets, downloads or what a page is allowed to start.
       ├──direct file───▶  this Mac  ──when whole──▶  SMB share
       │                   (after you approve it)
       │
-      └──"Open in Browser"──▶  your default browser, directly, outside the tunnel
+      ├──"Open in Browser"──▶  your default browser, directly, outside the tunnel
+      │
+      └──Automatic mode──▶  nas/automatic  ──▶  Sonarr ──▶ the gate ──▶ qBittorrent
+                            (your NAS)          the bar's sites ──▶ Prowlarr indexers
 ```
 
 - **`macapp/`** — SwiftUI, built with plain `swiftc`. No Xcode project.
 - **`tools/`** — the filter-list converter, test suites, and fixtures.
-- **`nas/`** — a tinyproxy container for the forward proxy.
+- **`nas/`** — a tinyproxy container for the forward proxy (`nas/fwd`), and the service
+  behind Automatic mode (`nas/automatic`).
 
 ## Install
 
@@ -113,6 +122,7 @@ not one Apple issued, so Gatekeeper will want a right-click and Open the first t
 | **Sites** | The home site, the sites in the bar, and a Firefox bookmark folder to mirror |
 | **Connection** | The forward proxy every request goes through — **required** |
 | **Torrent Client** | A qBittorrent Web API endpoint, for magnets and search plugins |
+| **Automatic** | The NAS service behind Automatic mode, its token, the seedbox sign-in it needs, and which of your sites it can search |
 | **Downloads** | An SMB share to file approved downloads into, and hosts allowed to send them |
 | **Mirrors** | Fallback domains for sites that move |
 | **Appearance** | Page zoom |
@@ -129,6 +139,9 @@ asks again forever.
 - **A forward (`CONNECT`) proxy you can reach.** Not optional — see below.
 - A torrent client and an SMB share are optional. Without them, magnets and download
   filing simply stay dormant.
+- Automatic mode is optional too. It needs a Docker host (a NAS, typically) running
+  Sonarr, ideally Prowlarr, and the service in `nas/automatic`; Plex is used for
+  suggestions if it is there. Until it is set up, Automatic mode shows how.
 
 ## What it does
 
@@ -379,11 +392,221 @@ download check.
 **Open in Browser** is not an exception to this. It is the same rule from the other side:
 handing a page off is a thing you do, never a thing a page does.
 
+## Automatic downloads
+
+Switch with the control beside the home button, or **Cmd-1** and **Cmd-2**. The browser
+stays exactly where you left it while Automatic mode is showing, and Cmd-R refreshes
+whichever side you are looking at.
+
+| Pane | What it is |
+|---|---|
+| **Following** | The shows whose new episodes are downloaded. Search to follow another. |
+| **Coming Up** | The last three days and the next four weeks, with where each episode is: aired and waiting for a release, downloading, on the seedbox, or on the NAS. |
+| **Seedbox** | What has downloaded, with **Bring to NAS**. |
+| **Blocked** | Every release that was refused, why, and the files that did it. |
+| **Suggestions** | Shows still airing that you picked by hand in the browser, or have been watching in Plex. |
+
+### How a new episode arrives
+
+**Sonarr** watches the calendar for the shows you follow and searches when an episode
+airs. It hands the release it chose to its download client — which is not qBittorrent
+but **the gate**, a small service on the NAS that speaks qBittorrent's API. The gate
+passes everything through to the seedbox's real qBittorrent except adding a torrent:
+
+- a `.torrent` file is read on the NAS, and a release that breaks the rules never
+  reaches the seedbox at all. One that passes still goes in **stopped**: the list that
+  is judged before anything downloads is qBittorrent's own reading of it, because a
+  crafted file can read one way to one parser and another way to libtorrent;
+- a magnet is added with `stopCondition=MetadataReceived`, so qBittorrent fetches the
+  file list and then stops by itself. The gate reads the list and either starts the
+  torrent or deletes it.
+
+A refused release is marked failed in Sonarr, which blocklists it and searches again.
+Sonarr only ever hears "Ok.", so a refusal never puts the download client into
+back-off. The real qBittorrent sign-in lives only in the gate; Sonarr gets a separate
+local login that is worthless anywhere else.
+
+### The sites decide where it searches
+
+The bar's sites — the home site included — are sent to the NAS whenever they change.
+Each is matched to a public Prowlarr indexer whose domains, mirrors included, share a
+domain with it, and only indexers that can search TV count. Those carry a
+`magnet-sites` tag, and so does Sonarr's entry in Prowlarr, so Prowlarr syncs exactly
+those indexers to Sonarr. Add a site to the bar and it is searched; hide or remove it
+and it stops.
+
+It tags rather than enables or disables, on purpose: anything else syncing from the
+same Prowlarr (Radarr, say) keeps every indexer it had, an indexer is never deleted, and
+one you turned off in Prowlarr stays off. If none of the sites can be searched for TV,
+Sonarr is not restricted at all — it keeps every indexer rather than ending up with
+none. **Settings → Automatic** lists each site with what became of it: searched, no TV
+on this site, no indexer exists for it, needs an account, or turned off in Prowlarr.
+
+Two things to know. An indexer added for one of your sites is new to Prowlarr, so any
+app that syncs every indexer (Radarr, with no tags) gets it too; tag that app in Prowlarr
+if it should not. And with more than one Sonarr in Prowlarr, name the one behind the gate
+in `PROWLARR_SONARR_APP`, or nothing is restricted.
+
+### What a release may contain
+
+Video, subtitles, and a few text or image extras. A release is refused outright when:
+
+- **any file is an executable.** `.exe`, and the same thing under another extension:
+  `.scr .com .pif .bat .cmd .msi .msp .msix .appx .lnk .cpl .dll .sys .drv .ocx .vbs
+  .vbe .js .jse .wsf .wsh .ps1 .psm1 .hta .jar .reg .scf .inf .application .gadget
+  .msc .chm .xll .wsc .sct .ws .appref-ms .library-ms .settingcontent-ms .diagcab
+  .search-ms .msu .cab .url`, disk images Windows mounts on a double-click (`.iso .img
+  .vhd .vhdx`), and the macOS equivalents (`.app .dmg .pkg .mpkg .command .sh .apk
+  .webloc .inetloc .fileloc .terminal .tool .workflow`), or anything inside an `.app`
+  bundle. The extension is what follows the last dot, after removing invisible
+  characters (the right-to-left override that makes `Episode<RLO>vkm.exe` look like a
+  video) and the trailing dots and spaces Windows ignores — so `..exe` is an `.exe` too;
+- **there is no video file of episode size** (50 MB or more);
+- **the largest file is not a video** — a sample clip beside a large archive.
+
+`.scr` is on the list because it was the real thing: a 0.9 GB `<hash>.scr`, grabbed by
+an earlier setup for a TV episode. The file list is checked again at Bring to NAS.
+
+### What makes a release good
+
+Sonarr chooses between releases by score, and `setup_sonarr.py` builds the score from
+[TRaSH Guides](https://github.com/TRaSH-Guides/Guides)' custom formats (vendored, MIT, in
+`nas/automatic/formats/`) — the community-maintained patterns for HDR type, audio,
+source, release-group reputation and known-bad releases. The weights are Magnet's, and
+each tier outweighs everything below it put together, so the order is strict:
+
+| What | Score |
+|---|---|
+| **Dolby Vision** | +10000 (−200 when there is no HDR10 fallback layer) |
+| 2160p / 1080p | +3000 / +500 |
+| HDR10, HDR10+ (+100 more), and other HDR | +1000 |
+| Release group: remux tiers, Blu-ray tiers, web tiers | +600 to +900 |
+| Audio: TrueHD Atmos down to Dolby Digital | +40 to +300 |
+| Hybrid, streaming-service boosts, repacks, internal | +5 to +100 |
+| No release group at all | −500 |
+| A tracker's tag on the title (`[TGx]`, `[EZTVx.to]`) | −50 |
+| A low-quality encoder (TRaSH's LQ list) | −1000 |
+| Banned: upscales, obfuscated names, AV1, x266, disc images, extras, bad dual-audio groups, audio only in a language the show was not made in, an executable at the end of the title | −100000 |
+
+The minimum to be taken at all is −1000, so a low-quality encode can still be the first
+copy when it is all there is — anything better replaces it within the week. TRaSH bans
+those outright, but its bans are tuned for private trackers; on public ones they are
+often what arrives first. The language rule is "not the original language" rather than
+"not English", so a Korean or Japanese show is not banned for being Korean or Japanese.
+
+Setup also sets Sonarr's **Propers and Repacks** to *Do not prefer*. Left at its default,
+Sonarr ranks a REPACK above any score — a 1080p repack would beat a Dolby Vision
+release. The repack formats (+5 to +7) still break ties.
+
+1080p and 2160p from every source share one quality tier, so it is the score that
+decides. Otherwise Sonarr ranks by source first, and a Blu-ray without Dolby Vision would
+beat a web release with it before the score was looked at. **That is what makes Dolby
+Vision win every time.** 720p is a fallback below them.
+
+Two of TRaSH's usual bans are deliberately left out: x265 at 1080p, and 2160p SDR. Both
+are things worth having when they are what exists.
+
+Minimum sizes per minute of runtime (2160p web: 15 MB/min, about 2 Mbps) keep a
+"2160p" that is 300 MB from ever being taken.
+
+### A copy as soon as there is one, a better one within the week
+
+Sonarr checks the indexers' new releases every 15 minutes and takes the first acceptable
+one. The **scout**, in the NAS service, covers what that misses:
+
+- **As soon as an episode airs** with nothing grabbed, it asks Sonarr to search: every 20
+  minutes for six hours, then every two hours.
+- **For seven days after the first copy**, it asks again every six hours. Sonarr takes a
+  release only when it beats the queued one by at least 100 points — a real step, like
+  Dolby Vision over HDR10, not a repack tag.
+- **When the week is over** the episode is unmonitored, so nothing replaces it again.
+- **A better copy that has finished downloading retires the worse one** from the seedbox,
+  unless that one is on its way to the NAS. A season pack stays until every episode in it
+  has something better.
+- **A download that stops moving** — no progress for three hours, or a magnet whose file
+  list never arrives in two — is dropped and marked failed, and Sonarr takes the next best.
+- **A first copy too slow to be one** — the episode's only copy, still more than four
+  hours from done after half an hour — is traded for the next best the same way. An
+  upgrade may take as long as it likes; there is already a copy.
+- Only a live copy counts. A grab the gate refused, or one dropped as stalled, does not
+  stop the hunt for a first copy, and an episode is never left alone after its week
+  unless it has a copy that finished.
+
+The window, the pace and the clean-up are settings in the service's `.env`
+(`SCOUT_WINDOW_DAYS`, `SCOUT_UPGRADE_EVERY_HOURS`, `SCOUT_STALL_HOURS`,
+`SCOUT_REMOVE_SUPERSEDED`, `SCOUT_FIRST_COPY_MAX_HOURS`).
+
+### It reads qBittorrent the way its window does
+
+Every decision about a download is made from what qBittorrent's own list would show for
+it — Downloading, Stalled, Queued, Checking, Stopped, Completed, Missing Files — worked
+out from its state, progress and bytes left, not from the progress figure alone.
+
+- **Finished** means every byte is there and no check is running. Only a finished copy
+  can be brought to the NAS or retire an older one; while qBittorrent is checking, the
+  progress it shows is the check's, and nothing acts on it.
+- **Stopped with data still to fetch** — what qBittorrent does when a check finds pieces
+  missing on a torrent that was stopped — is started again. Six restarts in an hour is
+  a fight, not a fix: it stops trying, and the scout replaces the release.
+- **Errored or missing its files** is rechecked, then resumed; replaced only if that
+  does not bring it back.
+- **Checking, moving or allocating** is never counted as stalled and never interrupted.
+
+The Seedbox pane shows the same words. The Seedbox pane shows, for each copy, what made it good and
+how long the search for a better one has left.
+
+### New episodes only
+
+Following a show monitors only the episodes that have not aired yet, and setting up
+unmonitors every episode that already has. Monitoring a back catalogue means any old
+episode that turns up in a feed becomes a download — which is how decade-old episodes,
+and that `.scr`, arrived. Unfollowing only stops monitoring; nothing is deleted.
+
+### Nothing moves to the NAS until you say so
+
+An episode waits on the seedbox until you press **Bring to NAS**. Sonarr then copies it —
+copies, so the seedbox keeps seeding — into the show's folder with its usual naming, and
+the media server picks it up.
+
+### When Sonarr is paused
+
+Some NAS setups pause containers while a stream is playing, so playback never stutters.
+A paused container accepts a connection and then never answers, which would leave
+everything waiting on a timeout. The service probes Sonarr with a three-second timeout
+instead, says so ("Sonarr is paused while Plex is streaming"), and keeps the seedbox view
+working. Sonarr catches up when it resumes; the site list waits for Prowlarr the same way.
+
+### Setting it up
+
+1. On the Mac, add `MAGNET_NAS_SSH` and `MAGNET_NAS_DIR` to `local.env`, and copy
+   `nas/automatic/site.env.example` to `site.env` (gitignored) with your seedbox, paths
+   and service addresses.
+2. `nas/automatic/deploy.sh --token` copies the service to the NAS, generates its
+   secrets there the first time, starts it, and puts the API token where Magnet reads it
+   (`~/Library/Application Support/Magnet/automatic-token`, mode 600).
+3. On the NAS, `python3 setup_sonarr.py --plan`, then without `--plan`. It changes
+   nothing at all until Sonarr can reach the gate (so do step 4 first), then switches
+   everything at once: the profile, the gate as the only torrent client, Completed
+   Download Handling off (an episode reaches the NAS only through Bring to NAS), and
+   new episodes only. It is idempotent, snapshots what it changes, and keeps the state
+   from before its first run as `rollback/sonarr-original.json` — the file
+   `rollback_sonarr.py` takes to undo all of it.
+4. In Magnet, Settings → Automatic: the service's address (a plain-http host also goes in
+   `MAGNET_HTTP_HOSTS`), then **Send Magnet's Sign-In**. It is checked against the seedbox
+   once and kept only on the NAS. A refused sign-in is never retried by itself, because
+   qBittorrent bans an address after a few failures, and that address is the NAS's.
+
 ## Testing
 
-`tools/tests/run.sh` runs eight offline suites — bookmarks, settings, wikipedia, fmhy,
-categories, banners, downloads, plugins — plus a hygiene check that greps the tree for
-anything identifying one person's setup. `--live` adds two that need network: mirror
+`tools/tests/run.sh` runs fourteen offline Swift suites — bookmarks, settings, wikipedia,
+fmhy, categories, banners, downloads, plugins, choicelog, qbsession, redirects,
+pagesafety, blocklists, automatic — then the Automatic service's Python tests (the gate,
+the file rules, qBittorrent and Sonarr conversations, and the sites-to-sources sync,
+and the scout, against in-process fakes), a check that every site probe goes through the proxy, and a
+hygiene check. Hygiene scans what is staged, the working copies and new files —
+Markdown included — for home directories, tailnet addresses and NAS volume paths, plus
+whatever you list in `tools/hygiene.local` (gitignored, one regex per line: your own
+hostnames and names, which the check could not list without publishing them). `--live` adds two that need network: mirror
 resolution against the real articles, and fetching every search-plugin URL in the
 catalogue to confirm it is still a working plugin.
 
@@ -395,13 +618,17 @@ catalogue to confirm it is still a working plugin.
   a media pipeline will pick captured files up, rename them and move them.
 - **Cleartext HTTP needs an App Transport Security exception**, listed in `local.env`.
   Without one the request fails before it leaves the process.
+- **Keep the Automatic service on a LAN or tailnet.** Its API wants a token and its gate
+  listens only on the Docker bridge, but neither is meant for the internet. The token,
+  the gate password and the seedbox sign-in live in gitignored files only their owner
+  can read.
 
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
 
 Not affiliated with any of the sites this can be pointed at, nor with uBlock Origin,
-qBittorrent, or FMHY.
+qBittorrent, Sonarr, Prowlarr, Plex, or FMHY.
 
 ---
 

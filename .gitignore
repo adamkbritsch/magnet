@@ -11,6 +11,8 @@ tools/.cache/
 # Machine-specific configuration and secrets
 local.env
 tools/seed-local.sh
+# This machine's own identifiers for the hygiene check (the check would publish them)
+tools/hygiene.local
 # Reverses this machine's deployment, NAS side included
 rollback.sh
 
@@ -19,3 +21,7 @@ backup/
 
 .DS_Store
 .serena/
+
+# Python bytecode from running the NAS service tests
+__pycache__/
+*.pyc
