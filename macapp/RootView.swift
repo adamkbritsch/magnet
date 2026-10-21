@@ -9,6 +9,7 @@ struct RootView: View {
     @StateObject private var plugins = SearchPluginSync()
     @StateObject private var automatic = AutomaticModel()
     @StateObject private var sources = AutoSourceSync()
+    @StateObject private var qbPane = QBPaneController()
     @State private var generation = 0
     @ObservedObject private var settings = AppSettings.shared
     @State private var showSettings = false
@@ -19,31 +20,34 @@ struct RootView: View {
     @State private var homeURL: URL?
 
     var body: some View {
-        VStack(spacing: 0) {
-            TopBar(routes: routes, web: web, bookmarks: bookmarks,
-                   blocker: blocker, settings: settings, automatic: automatic,
-                   showSettings: $showSettings, onHome: { settings.mode = "manual"; goHome() })
-            Divider().overlay(Theme.hairline)
-            // The browser stays mounted while Automatic mode is showing, so its page,
-            // history and scroll position are exactly where they were on the way back.
-            ZStack {
-                content
-                    .opacity(settings.isAutomatic ? 0 : 1)
-                    .allowsHitTesting(!settings.isAutomatic)
-                    .accessibilityHidden(settings.isAutomatic)
-                    // Hidden is not enough: its default buttons would still answer Return.
-                    .disabled(settings.isAutomatic)
-                if settings.isAutomatic {
-                    AutomaticView(model: automatic, settings: settings) {
-                        settingsTab = .automatic
-                        showSettings = true
-                    }
+        // qBittorrent's pane and the rest of Magnet, placed by PaneSplit: the left half
+        // of a wide window, the top of a narrow one, slid away when hidden.
+        GeometryReader { geo in
+            let axis = PaneSplit.axis(for: geo.size)
+            let paneVisible = settings.qbPaneVisible
+            QBSplitLayout(shown: paneVisible) {
+                QBPaneView(controller: qbPane, inTitlebar: true) {
+                    settingsTab = .client
+                    showSettings = true
                 }
+                .overlay(alignment: axis == .horizontal ? .trailing : .bottom) {
+                    Rectangle().fill(Theme.hairline)
+                        .frame(width: axis == .horizontal ? 1 : nil,
+                               height: axis == .horizontal ? nil : 1)
+                }
+                .allowsHitTesting(paneVisible)
+                .accessibilityHidden(!paneVisible)
+
+                // Its bar is in the titlebar row unless the pane sits above it, and it
+                // leaves room for the window buttons only when nothing is to its left.
+                magnetColumn(inTitlebar: !(paneVisible && axis == .vertical),
+                             gutter: !paneVisible, paneAxis: axis)
             }
-            .overlay(alignment: .bottom) { toastView }
-            .animation(.easeInOut(duration: 0.2), value: web.toast)
         }
+        .clipped()
         .background(Color(nsColor: .windowBackgroundColor))
+        .modifier(QBPaneTriggers(settings: settings, pane: qbPane))
+        .onReceive(NotificationCenter.default.publisher(for: .qbTogglePane)) { _ in togglePane() }
         .sheet(isPresented: $showSettings, onDismiss: {
             settingsTab = .sites
             if settings.isAutomatic { NSApp.mainWindow?.makeFirstResponder(nil) }
@@ -100,7 +104,10 @@ struct RootView: View {
             if !settings.isAutomatic { web.goBack() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .qbReload)) { _ in
-            if settings.isAutomatic { Task { await automatic.refresh() } }
+            // The side with the keyboard: Cmd-R while working in qBittorrent reloads
+            // qBittorrent, not the page beside it.
+            if settings.qbPaneVisible && qbPane.hasKeyboardFocus { qbPane.toggleReload() }
+            else if settings.isAutomatic { Task { await automatic.refresh() } }
             else if web.isLoading { web.stop() } else { web.reload() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .qbSettings)) { _ in showSettings = true }
@@ -119,6 +126,41 @@ struct RootView: View {
                                      sync: syncPlugins))
         .modifier(AutomaticTriggers(bookmarks: bookmarks, settings: settings,
                                     automatic: automatic, sources: sources, syncSources: syncSources))
+    }
+
+    private func togglePane() {
+        guard settings.qbPaneAvailable else { return }
+        withAnimation(.easeInOut(duration: 0.22)) { settings.qbPaneShown.toggle() }
+    }
+
+    private func magnetColumn(inTitlebar: Bool, gutter: Bool, paneAxis: PaneSplit.Axis) -> some View {
+        VStack(spacing: 0) {
+            TopBar(routes: routes, web: web, bookmarks: bookmarks,
+                   blocker: blocker, settings: settings, automatic: automatic,
+                   showSettings: $showSettings, inTitlebar: inTitlebar, gutter: gutter,
+                   paneAxis: paneAxis, onTogglePane: togglePane,
+                   onHome: { settings.mode = "manual"; goHome() })
+            Divider().overlay(Theme.hairline)
+            // The browser stays mounted while Automatic mode is showing, so its page,
+            // history and scroll position are exactly where they were on the way back.
+            ZStack {
+                content
+                    .opacity(settings.isAutomatic ? 0 : 1)
+                    .allowsHitTesting(!settings.isAutomatic)
+                    .accessibilityHidden(settings.isAutomatic)
+                    // Hidden is not enough: its default buttons would still answer Return.
+                    .disabled(settings.isAutomatic)
+                if settings.isAutomatic {
+                    AutomaticView(model: automatic, settings: settings) {
+                        settingsTab = .automatic
+                        showSettings = true
+                    }
+                }
+            }
+            .overlay(alignment: .bottom) { toastView }
+            .animation(.easeInOut(duration: 0.2), value: web.toast)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     @ViewBuilder
@@ -277,6 +319,37 @@ private struct AutomaticTriggers: ViewModifier {
     }
 }
 
+/// The qBittorrent pane's side effects.
+///
+/// - Loads it the first time it is shown, never at launch while hidden.
+/// - Follows a change of qBittorrent's address once it has settled, rather than loading
+///   every half-typed address on the way.
+/// - Gives a refused sign-in another chance when the saved one is changed.
+private struct QBPaneTriggers: ViewModifier {
+    @ObservedObject var settings: AppSettings
+    let pane: QBPaneController
+    @State private var addressSettle: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { pane.setShown(settings.qbPaneVisible, base: settings.qbBase) }
+            .onChange(of: settings.qbPaneVisible) { _, visible in
+                pane.setShown(visible, base: settings.qbBase)
+            }
+            .onChange(of: settings.qbBaseURL) { _, value in
+                addressSettle?.cancel()
+                addressSettle = Task {
+                    try? await Task.sleep(for: .milliseconds(800))
+                    guard !Task.isCancelled, settings.qbBaseURL == value else { return }
+                    pane.setShown(settings.qbPaneVisible, base: settings.qbBase)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .qbCredentialsChanged)) { _ in
+                pane.credentialsChanged()
+            }
+    }
+}
+
 /// A site added to the bar becomes a search plugin in qBittorrent.
 ///
 /// Driven off the bar rather than off the add button, so a site added on another
@@ -306,6 +379,12 @@ private struct TopBar: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var automatic: AutomaticModel
     @Binding var showSettings: Bool
+    /// In the window's titlebar row, so its controls line up with the window buttons.
+    let inTitlebar: Bool
+    /// At the window's left edge, so it leaves room for the window buttons.
+    let gutter: Bool
+    let paneAxis: PaneSplit.Axis
+    let onTogglePane: () -> Void
     let onHome: () -> Void
 
     /// Hands the page to the default browser, which reaches it directly rather than
@@ -325,10 +404,21 @@ private struct TopBar: View {
         VStack(spacing: 0) {
             ZStack(alignment: .bottom) {
                 VisualEffectView()
-                WindowDragArea()
+                if inTitlebar { WindowDragArea() }
 
                 HStack(spacing: 10) {
-                    Color.clear.frame(width: Theme.trafficLightGutter, height: 1)
+                    if gutter { Color.clear.frame(width: Theme.trafficLightGutter, height: 1) }
+
+                    // qBittorrent's own interface, beside the browser in a wide window and
+                    // above it in a narrow one. Absent until qBittorrent's address is set.
+                    if settings.qbPaneAvailable {
+                        let shown = settings.qbPaneVisible
+                        ChromeButton(symbol: paneAxis == .horizontal
+                                        ? "sidebar.left" : "rectangle.topthird.inset.filled",
+                                     help: (shown ? "Hide" : "Show") + " qBittorrent (\u{2303}\u{2318}S)",
+                                     isOn: shown,
+                                     action: onTogglePane)
+                    }
 
                     if !settings.isAutomatic {
                         ChromeButton(symbol: "chevron.left", help: "Back") { web.goBack() }
@@ -412,7 +502,8 @@ private struct TopBar: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .frame(height: Theme.barHeight)
+                .frame(height: inTitlebar ? Theme.titlebarBandHeight : Theme.barHeight)
+                .frame(maxHeight: .infinity, alignment: .top)
 
                 if web.isLoading && !settings.isAutomatic {
                     GeometryReader { geo in
@@ -1373,7 +1464,7 @@ private struct ClientTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 SettingRow(label: "qBittorrent Web API",
-                           hint: "Magnet and .torrent links are posted here instead of being handed to another app. Often a reverse proxy in front of the client rather than the client's own port, which is what makes this work on networks that block it. Empty means magnets are left alone.") {
+                           hint: "Magnet and .torrent links are posted here instead of being handed to another app, and it is what the qBittorrent pane shows (\u{2303}\u{2318}S). Often a reverse proxy in front of the client rather than the client's own port, which is what makes this work on networks that block it. Empty means magnets are left alone.") {
                     MonoField(placeholder: "http://host:8080/", text: $settings.qbBaseURL)
                 }
 
@@ -1448,6 +1539,7 @@ private struct ClientTab: View {
         .sheet(isPresented: $editingCredentials) {
             CredentialSheet(title: "qBittorrent sign-in") { user, pass in
                 QBCredentialStore.save(username: user, password: pass)
+                NotificationCenter.default.post(name: .qbCredentialsChanged, object: nil)
             }
         }
     }

@@ -45,13 +45,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // corners were visibly squarer than its siblings'. There is no public API to
         // set a corner radius directly; the titlebar is the only lever.
         //
-        // Nothing is ever added to the toolbar. The content is laid out below the
-        // titlebar via the normal safe area, so the taller titlebar simply moves it
-        // down 8pt -- no view here measures or assumes a titlebar height.
+        // Nothing is ever added to the toolbar.
         let toolbar = NSToolbar(identifier: "MagnetChrome")
         window.toolbar = toolbar
         window.toolbarStyle = .unifiedCompact
-        window.contentView = NSHostingView(rootView: RootView())
+        // Where AppKit actually put the window buttons, so the bars in the titlebar row
+        // centre their controls on them. MUST run after the toolbar is attached: the
+        // toolbar is what makes the titlebar taller. NSView is bottom-left origin, hence
+        // height - midY for a distance from the top.
+        window.layoutIfNeeded()
+        if let close = window.standardWindowButton(.closeButton), let frameView = close.superview {
+            let fromTop = frameView.bounds.height - close.frame.midY
+            if fromTop > 4, fromTop < 60 { Theme.trafficLightCenterY = fromTop }
+        }
+        let host = NSHostingView(rootView: RootView())
+        // The top bars ARE the titlebar. Left to its default, the hosting view applies
+        // the hidden titlebar's safe area and pushes everything down, which left an
+        // empty strip across the top with the bar below-right of the window buttons.
+        host.safeAreaRegions = []
+        // The window's size is the user's business, not the content's: by default the
+        // hosting view publishes the content's ideal size as the window's limits.
+        host.sizingOptions = []
+        window.contentView = host
         window.setFrameAutosaveName(Self.frameAutosaveName)
         if UserDefaults.standard.string(forKey: "NSWindow Frame \(Self.frameAutosaveName)") == nil {
             window.center()
@@ -101,6 +116,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(withTitle: "Manual", action: #selector(showManual), keyEquivalent: "1").target = self
         viewMenu.addItem(withTitle: "Automatic", action: #selector(showAutomatic), keyEquivalent: "2").target = self
         viewMenu.addItem(.separator())
+        // Control-Command-S is the standard Show/Hide Sidebar key.
+        let pane = viewMenu.addItem(withTitle: "Show qBittorrent", action: #selector(toggleQBittorrent),
+                                    keyEquivalent: "s")
+        pane.keyEquivalentModifierMask = [.command, .control]
+        pane.target = self
+        viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Home", action: #selector(goHome), keyEquivalent: "H").target = self
         viewMenu.addItem(withTitle: "Back", action: #selector(goBack), keyEquivalent: "[").target = self
         viewMenu.addItem(withTitle: "Reload", action: #selector(reload), keyEquivalent: "r").target = self
@@ -131,4 +152,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func recheck() { NotificationCenter.default.post(name: .qbRecheck, object: nil) }
     @objc private func showManual() { NotificationCenter.default.post(name: .qbModeManual, object: nil) }
     @objc private func showAutomatic() { NotificationCenter.default.post(name: .qbModeAutomatic, object: nil) }
+    @objc private func toggleQBittorrent() { NotificationCenter.default.post(name: .qbTogglePane, object: nil) }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleQBittorrent) {
+            let settings = AppSettings.shared
+            item.title = settings.qbPaneVisible ? "Hide qBittorrent" : "Show qBittorrent"
+            // Nothing to show until qBittorrent's address is set.
+            return settings.qbPaneAvailable
+        }
+        return true
+    }
 }

@@ -95,8 +95,18 @@ final class AppSettings: ObservableObject {
     /// cannot surprise anyone who has not set one up.
     @Published var syncSearchPlugins: Bool { didSet { put("qb.syncPlugins", syncSearchPlugins) } }
 
+    /// Whether qBittorrent's own interface is showing beside the browser. On by
+    /// default; it only ever appears once a qBittorrent address is set.
+    @Published var qbPaneShown: Bool { didSet { put("qb.pane.shown", qbPaneShown) } }
+
     var qbBase: URL? { URL(string: qbBaseURL.trimmingCharacters(in: .whitespaces)) }
     var qbConfigured: Bool { qbBase != nil }
+    /// The pane needs a real web address, not merely something URL() accepts.
+    var qbPaneAvailable: Bool {
+        guard let base = qbBase, let scheme = base.scheme?.lowercased() else { return false }
+        return (scheme == "http" || scheme == "https") && base.host != nil
+    }
+    var qbPaneVisible: Bool { qbPaneShown && qbPaneAvailable }
 
     // MARK: Automatic downloads
 
@@ -196,6 +206,7 @@ final class AppSettings: ObservableObject {
         syncSearchPlugins = (d.object(forKey: "qb.syncPlugins") as? Bool) ?? true
         qbKeychainService = d.string(forKey: "qb.keychainService")
             ?? "\(AppSettings.bundleID).qbittorrent"
+        qbPaneShown = (d.object(forKey: "qb.pane.shown") as? Bool) ?? true
 
         automaticServer = d.string(forKey: "automatic.server") ?? ""
         mode = d.string(forKey: "ui.mode") == "automatic" ? "automatic" : "manual"
@@ -240,6 +251,7 @@ final class AppSettings: ObservableObject {
                     "proxy.host", "proxy.port", "proxy.keychainService",
                     "qb.baseURL", "qb.keychainService", "qb.syncPlugins",
                     "qb.plugins.signature", "qb.plugins.failed",
+                    "qb.pane.shown", "qb.pane.zoom", "qb.pane.autoLogin",
                     "automatic.server", "ui.mode", "automatic.sources.signature",
                     "nas.host", "nas.share", "nas.user", "archive.root",
                     "archive.localPath", "archive.folders", "downloads.allowedHosts",

@@ -6,6 +6,14 @@ import SwiftUI
 enum Theme {
     static let barHeight: CGFloat = 44
     static let trafficLightGutter: CGFloat = 78
+
+    /// Distance from the window's top edge to the CENTRE of the traffic lights, measured
+    /// from the real buttons at launch (main.swift) rather than assumed. The content view
+    /// starts at the true window top, so a bar in the titlebar row centres its controls
+    /// on this line. The seed is a sane fallback for the frame before it is measured.
+    static var trafficLightCenterY: CGFloat = 20
+    /// The band of a top bar that lines up with the window buttons.
+    static var titlebarBandHeight: CGFloat { max(26, trafficLightCenterY * 2) }
     static let hairline = Color.primary.opacity(0.09)
     static let pillFill = Color.primary.opacity(0.06)
     static let pillFillHover = Color.primary.opacity(0.11)
@@ -77,6 +85,8 @@ struct WindowDragArea: NSViewRepresentable {
 struct ChromeButton: View {
     let symbol: String
     let help: String
+    /// Drawn pressed, for a button that shows or hides something.
+    var isOn: Bool = false
     let action: () -> Void
 
     @State private var hovering = false
@@ -89,7 +99,7 @@ struct ChromeButton: View {
                 .frame(width: 26, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(hovering ? Theme.pillFill : Color.clear)
+                        .fill(isOn ? Theme.pillFillHover : hovering ? Theme.pillFill : Color.clear)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
@@ -112,4 +122,6 @@ extension Notification.Name {
     static let qbRecheck = Notification.Name("qb.recheck")
     static let qbModeManual = Notification.Name("qb.mode.manual")
     static let qbModeAutomatic = Notification.Name("qb.mode.automatic")
+    static let qbTogglePane = Notification.Name("qb.pane.toggle")
+    static let qbCredentialsChanged = Notification.Name("qb.credentials.changed")
 }

@@ -23,6 +23,9 @@ follows the TV shows you choose and, when a new episode airs, finds it on those 
 sites, reads what the release actually contains, and downloads it to your seedbox with
 no browser involved. The sites in the bar are the sites it searches.
 
+Beside both sides sits **qBittorrent itself**: the client's own web interface in a pane
+of the same window, so a torrent picked on the right can be watched arriving on the left.
+
 It ships with **nothing configured** — no sites, no home page, no services. All of it
 is set up in Settings.
 
@@ -228,6 +231,32 @@ client having never been touched. The handoff also sat outside the main-frame ch
 a cross-origin advert frame could reach it — and on the `.torrent` side it handed the
 client whatever URL the page named, making your seedbox fetch for a stranger. A
 `.torrent` URL now has to come from a host you actually use.
+
+### qBittorrent in the same window
+
+The client's own web interface opens in a pane beside the browser, at the address the
+magnets go to and with the same saved sign-in. It used to be a separate app placed next
+to this one; it is now part of the window, and only qBittorrent came along (no ruTorrent
+switch). The sidebar button at the left of the bar, or **View → Show qBittorrent**
+(⌃⌘S), shows and hides it.
+
+Where it goes depends on the window:
+
+| Window | qBittorrent |
+| --- | --- |
+| 1240pt wide or more (a full-width window on a laptop or larger) | The left half, side by side |
+| Narrower | The top half, above the browser, so neither side is squeezed below usable |
+| Hidden | Slides off the edge it came from, and the browser takes the whole window |
+
+It loads the first time it is shown, not at launch, and reads the Keychain only if the
+page has no session already. Sign-in happens inside the page, so the session cookie
+lands where the interface reads it. A good sign-in is confirmed by asking qBittorrent
+for its version afterwards, which only works if the session really started. That covers
+both 5.1's `200 Ok.` and 5.2's empty `204`; the standalone app read the 204 as a
+rejection. After two refusals it stops trying for the launch, because qBittorrent bans
+an address after a few failures and the address it would ban is the NAS's. The pane has
+its own cookie store, kept apart from the browser's, which carries the HTTPS-only
+CONNECT proxy when Via NAS is on. ⌘R reloads whichever side has the keyboard.
 
 ### Adding a site adds its search plugin
 
@@ -598,9 +627,11 @@ working. Sonarr catches up when it resumes; the site list waits for Prowlarr the
 
 ## Testing
 
-`tools/tests/run.sh` runs fourteen offline Swift suites — bookmarks, settings, wikipedia,
+`tools/tests/run.sh` runs fifteen offline Swift suites — bookmarks, settings, wikipedia,
 fmhy, categories, banners, downloads, plugins, choicelog, qbsession, redirects,
-pagesafety, blocklists, automatic — then the Automatic service's Python tests (the gate,
+pagesafety, blocklists, automatic, qbpane (where the qBittorrent pane sits at every
+window size, and its sign-in script run in a real web view against a local stand-in
+for qBittorrent 5.1, 5.2, a ban, a redirect and a 204 that set no session) — then the Automatic service's Python tests (the gate,
 the file rules, qBittorrent and Sonarr conversations, and the sites-to-sources sync,
 and the scout, against in-process fakes), a check that every site probe goes through the proxy, and a
 hygiene check. Hygiene scans what is staged, the working copies and new files —
