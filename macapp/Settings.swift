@@ -98,6 +98,13 @@ final class AppSettings: ObservableObject {
     /// Whether qBittorrent's own interface is showing beside the browser. On by
     /// default; it only ever appears once a qBittorrent address is set.
     @Published var qbPaneShown: Bool { didSet { put("qb.pane.shown", qbPaneShown) } }
+    /// Where the divider was dragged to, as qBittorrent's share of the window: one for
+    /// side by side and one for stacked, because a share that suits one rarely suits
+    /// the other. Remembered across launches.
+    @Published var qbPaneFractionWide: Double { didSet { put("qb.pane.fraction.wide", qbPaneFractionWide) } }
+    @Published var qbPaneFractionStacked: Double {
+        didSet { put("qb.pane.fraction.stacked", qbPaneFractionStacked) }
+    }
 
     var qbBase: URL? { URL(string: qbBaseURL.trimmingCharacters(in: .whitespaces)) }
     var qbConfigured: Bool { qbBase != nil }
@@ -207,6 +214,13 @@ final class AppSettings: ObservableObject {
         qbKeychainService = d.string(forKey: "qb.keychainService")
             ?? "\(AppSettings.bundleID).qbittorrent"
         qbPaneShown = (d.object(forKey: "qb.pane.shown") as? Bool) ?? true
+        // Anything outside a sane share is a damaged value, not a preference.
+        func share(_ key: String) -> Double {
+            let v = d.double(forKey: key)
+            return v >= 0.05 && v <= 0.95 ? v : 0.5
+        }
+        qbPaneFractionWide = share("qb.pane.fraction.wide")
+        qbPaneFractionStacked = share("qb.pane.fraction.stacked")
 
         automaticServer = d.string(forKey: "automatic.server") ?? ""
         mode = d.string(forKey: "ui.mode") == "automatic" ? "automatic" : "manual"
@@ -252,6 +266,7 @@ final class AppSettings: ObservableObject {
                     "qb.baseURL", "qb.keychainService", "qb.syncPlugins",
                     "qb.plugins.signature", "qb.plugins.failed",
                     "qb.pane.shown", "qb.pane.zoom", "qb.pane.autoLogin",
+                    "qb.pane.fraction.wide", "qb.pane.fraction.stacked",
                     "automatic.server", "ui.mode", "automatic.sources.signature",
                     "nas.host", "nas.share", "nas.user", "archive.root",
                     "archive.localPath", "archive.folders", "downloads.allowedHosts",

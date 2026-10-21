@@ -134,6 +134,15 @@ not one Apple issued, so Gatekeeper will want a right-click and Open the first t
 **4. Choose "Always Allow" if macOS asks about the Keychain.** "Allow" is one-shot and
 asks again forever.
 
+Both sign-ins (the proxy's and qBittorrent's) live in **one** Keychain item, which Magnet
+creates, so there is one box to answer, not one per sign-in. That item is read once per
+launch: every part of the app that needs a sign-in at the same moment waits for that one
+read rather than starting its own, and each read would be its own box. A build signed
+without a Team ID is a new identity to the Keychain every time it is rebuilt, so a
+rebuild asks once more. The first launch after moving to the single item copies each
+older item in, which is one box per older item, one time only. The older items are left
+in place.
+
 ## Requirements
 
 - macOS 14 or later. Building needs Xcode's command line tools; the icon step also wants
@@ -247,6 +256,12 @@ Where it goes depends on the window:
 | 1240pt wide or more (a full-width window on a laptop or larger) | The left half, side by side |
 | Narrower | The top half, above the browser, so neither side is squeezed below usable |
 | Hidden | Slides off the edge it came from, and the browser takes the whole window |
+
+The line between them can be dragged; double-click it to split evenly again. Where you
+leave it is remembered across launches as qBittorrent's share of the window, so it keeps
+its proportion as the window is resized. Side by side and stacked each remember their
+own share. It stops short of squeezing either side: qBittorrent keeps at least 400pt and
+Magnet at least 600pt, enough for its top bar.
 
 It loads the first time it is shown, not at launch, and reads the Keychain only if the
 page has no session already. Sign-in happens inside the page, so the session cookie
@@ -630,7 +645,8 @@ working. Sonarr catches up when it resumes; the site list waits for Prowlarr the
 `tools/tests/run.sh` runs fifteen offline Swift suites — bookmarks, settings, wikipedia,
 fmhy, categories, banners, downloads, plugins, choicelog, qbsession, redirects,
 pagesafety, blocklists, automatic, qbpane (where the qBittorrent pane sits at every
-window size, and its sign-in script run in a real web view against a local stand-in
+window size, how far the divider can be dragged and that its place is saved, and its
+sign-in script run in a real web view against a local stand-in
 for qBittorrent 5.1, 5.2, a ban, a redirect and a 204 that set no session) — then the Automatic service's Python tests (the gate,
 the file rules, qBittorrent and Sonarr conversations, and the sites-to-sources sync,
 and the scout, against in-process fakes), a check that every site probe goes through the proxy, and a

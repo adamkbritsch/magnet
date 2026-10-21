@@ -17,16 +17,16 @@ run() {
 }
 
 run bookmarks  "$(dirname "$0")/bookmarks/main.swift"  "$SRC/Settings.swift" "$SRC/Bookmarks.swift"
-run settings   "$(dirname "$0")/settings/main.swift"   "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
-run wikipedia  "$(dirname "$0")/wikipedia/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift"
-run fmhy       "$(dirname "$0")/fmhy/main.swift"       "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift"
-run categories "$(dirname "$0")/categories/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
+run settings   "$(dirname "$0")/settings/main.swift"   "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
+run wikipedia  "$(dirname "$0")/wikipedia/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift"
+run fmhy       "$(dirname "$0")/fmhy/main.swift"       "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift"
+run categories "$(dirname "$0")/categories/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift"
 run banners    "$(dirname "$0")/banners/main.swift"    "$SRC/Domains.swift" "$SRC/Banners.swift"
-run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/Downloads.swift"
-run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
+run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/Downloads.swift"
+run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 if [ "${1:-}" = "--live" ]; then
   run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
-  run plugins-live "$(dirname "$0")/pluginslive/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
+  run plugins-live "$(dirname "$0")/pluginslive/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 fi
 
 # Every probe that touches a SITE must go through the proxy. A bare URLSession here
@@ -35,13 +35,13 @@ fi
 # torrent client and the plugin catalogue are reached deliberately off-proxy.
 # WebKit's compiler is all-or-nothing: one malformed rule fails the whole list, and
 # the app swallows it. Half the blocking once vanished this way with no symptom.
-run choicelog  "$(dirname "$0")/choicelog/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift"
-run qbsession  "$(dirname "$0")/qbsession/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift"
-run redirects  "$(dirname "$0")/redirects/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/Mirrors.swift" "$SRC/Routes.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Downloads.swift"
+run choicelog  "$(dirname "$0")/choicelog/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift"
+run qbsession  "$(dirname "$0")/qbsession/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift"
+run redirects  "$(dirname "$0")/redirects/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/Mirrors.swift" "$SRC/Routes.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Downloads.swift"
 run pagesafety "$(dirname "$0")/pagesafety/main.swift" "$SRC/Domains.swift" "$SRC/Banners.swift"
 run blocklists "$(dirname "$0")/blocklists/main.swift"
-run automatic  "$(dirname "$0")/automatic/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift" "$SRC/Automatic.swift"
-run qbpane     "$(dirname "$0")/qbpane/main.swift"     "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Magnet.swift" "$SRC/Theme.swift" "$SRC/PaneSplit.swift" "$SRC/QBittorrentPane.swift"
+run automatic  "$(dirname "$0")/automatic/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift" "$SRC/Automatic.swift"
+run qbpane     "$(dirname "$0")/qbpane/main.swift"     "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/Theme.swift" "$SRC/PaneSplit.swift" "$SRC/QBittorrentPane.swift"
 echo "=============== proxy discipline ==============="
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BARE="$(grep -nE 'URLSession\.shared|URLSession\(configuration:' "$ROOT/macapp/Mirrors.swift" 2>/dev/null || true)"

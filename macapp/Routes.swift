@@ -24,66 +24,23 @@ enum X1337Route: String, CaseIterable, Identifiable {
     var symbol: String { "lock.shield" }
 }
 
-/// The NAS forward-proxy password, kept in the Keychain rather than in the binary.
+/// The NAS forward-proxy password, kept in the Keychain rather than in the binary --
+/// in Magnet's one sign-ins item (SecretVault), alongside qBittorrent's.
 enum ProxyCredentialStore {
-    private static var service: String { Config.proxyKeychainService }
-    private static let lock = NSLock()
-    private static var cached: (user: String, pass: String)?
-    private static var primed = false
+    /// Where the password lived before SecretVault, and is copied from once.
+    private static var legacyService: String { Config.proxyKeychainService }
 
     static func load() -> (user: String, pass: String)? {
-        lock.lock()
-        if primed { let v = cached; lock.unlock(); return v }
-        lock.unlock()
-
-        let q: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnAttributes as String: true,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        var result: (String, String)?
-        if SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
-           let d = item as? [String: Any],
-           let acct = d[kSecAttrAccount as String] as? String,
-           let data = d[kSecValueData as String] as? Data,
-           let pw = String(data: data, encoding: .utf8) {
-            result = (acct, pw)
-        }
-        lock.lock(); cached = result; primed = true; lock.unlock()
-        return result
+        SecretVault.contents().proxy.map { ($0.user, $0.pass) }
     }
 
-    /// Whether an item exists, WITHOUT reading it. Attributes-only queries are not
-    /// subject to the item's ACL, so this never puts up a password box.
+    /// Whether a password is saved, WITHOUT reading it, so this never puts up a box.
     static func exists() -> Bool {
-        let q: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        return SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess
+        SecretVault.has(\.proxy, legacyService: legacyService)
     }
 
     static func save(user: String, pass: String) {
-        let del: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-        ]
-        for _ in 0..<32 where SecItemDelete(del as CFDictionary) == errSecSuccess {}
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: user,
-            kSecValueData as String: Data(pass.utf8),
-            kSecAttrLabel as String: "1337x NAS forward proxy",
-        ]
-        SecItemAdd(add as CFDictionary, nil)
-        lock.lock(); cached = (user, pass); primed = true; lock.unlock()
+        SecretVault.update { $0.proxy = SecretVault.Pair(user: user, pass: pass) }
     }
 
     /// Order matters: the environment is checked FIRST. Asking the Keychain whether

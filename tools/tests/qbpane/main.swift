@@ -60,6 +60,41 @@ for width in stride(from: CGFloat(900), through: 2600, by: 37) {
 }
 check("every size from 900 to 2600 wide tiles the window exactly", true)
 
+// MARK: - The divider
+
+let wideSize = CGSize(width: 1728, height: 1021)
+let third = PaneSplit.frames(for: wideSize, shown: true, fraction: 0.3)
+check("a dragged divider moves the split", third.pane.width == 518 && third.magnet.minX == 518, "\(third)")
+check("the grab area straddles the line",
+      third.handle.midX == 518 && third.handle.width == PaneSplit.handleThickness, "\(third.handle)")
+check("qBittorrent cannot be dragged below its minimum",
+      PaneSplit.frames(for: wideSize, shown: true, fraction: 0.05).pane.width == PaneSplit.minPaneWidth)
+check("Magnet cannot be dragged below its minimum",
+      PaneSplit.frames(for: wideSize, shown: true, fraction: 0.95).magnet.width == PaneSplit.minMagnetWidth)
+check("a drag to x=600 stores qBittorrent's share",
+      abs(PaneSplit.fraction(forDragTo: 600, in: wideSize) - 600.0 / 1728) < 0.0001)
+check("a drag past the edge stores only what the divider can reach",
+      PaneSplit.fraction(forDragTo: 5, in: wideSize) * 1728 == PaneSplit.minPaneWidth
+        && PaneSplit.fraction(forDragTo: 1720, in: wideSize) * 1728 == 1728 - PaneSplit.minMagnetWidth)
+let grown = PaneSplit.frames(for: CGSize(width: 2560, height: 1400), shown: true, fraction: 0.3)
+check("the share holds as the window grows", grown.pane.width == 768, "\(grown.pane)")
+let tallSize = CGSize(width: 1000, height: 1000)
+check("stacked, a drag sets the height share",
+      PaneSplit.frames(for: tallSize, shown: true,
+                       fraction: PaneSplit.fraction(forDragTo: 400, in: tallSize)).pane.height == 400)
+check("stacked, the handle lies across the full width",
+      PaneSplit.frames(for: tallSize, shown: true).handle.width == 1000)
+
+// Remembered across launches: what is stored is what a new launch reads back.
+MainActor.assumeIsolated {
+    AppSettings.shared.qbPaneFractionWide = 0.37
+    AppSettings.shared.qbPaneFractionStacked = 0.61
+    check("the side-by-side share is saved", UserDefaults.standard.double(forKey: "qb.pane.fraction.wide") == 0.37)
+    check("the stacked share is saved separately",
+          UserDefaults.standard.double(forKey: "qb.pane.fraction.stacked") == 0.61)
+    AppSettings.shared.resetAll()
+}
+
 // MARK: - Reading qBittorrent's answers
 
 check("204 sign-in path reads as success", QBPaneAuthScript.interpret("ok") == .success)

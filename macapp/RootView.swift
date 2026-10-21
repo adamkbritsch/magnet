@@ -18,6 +18,8 @@ struct RootView: View {
     @State private var started = false
     /// The domain actually opened, which may be a mirror of the configured home.
     @State private var homeURL: URL?
+    /// Where the divider is while it is being dragged; nil otherwise.
+    @State private var dragFraction: CGFloat?
 
     var body: some View {
         // qBittorrent's pane and the rest of Magnet, placed by PaneSplit: the left half
@@ -25,15 +27,11 @@ struct RootView: View {
         GeometryReader { geo in
             let axis = PaneSplit.axis(for: geo.size)
             let paneVisible = settings.qbPaneVisible
-            QBSplitLayout(shown: paneVisible) {
+            let stored = axis == .horizontal ? settings.qbPaneFractionWide : settings.qbPaneFractionStacked
+            QBSplitLayout(shown: paneVisible, fraction: dragFraction ?? CGFloat(stored)) {
                 QBPaneView(controller: qbPane, inTitlebar: true) {
                     settingsTab = .client
                     showSettings = true
-                }
-                .overlay(alignment: axis == .horizontal ? .trailing : .bottom) {
-                    Rectangle().fill(Theme.hairline)
-                        .frame(width: axis == .horizontal ? 1 : nil,
-                               height: axis == .horizontal ? nil : 1)
                 }
                 .allowsHitTesting(paneVisible)
                 .accessibilityHidden(!paneVisible)
@@ -42,6 +40,25 @@ struct RootView: View {
                 // leaves room for the window buttons only when nothing is to its left.
                 magnetColumn(inTitlebar: !(paneVisible && axis == .vertical),
                              gutter: !paneVisible, paneAxis: axis)
+
+                if paneVisible {
+                    // Live while dragging, saved when let go: one write per drag rather
+                    // than one per frame.
+                    PaneDivider(axis: axis, onDrag: { position in
+                        dragFraction = PaneSplit.fraction(forDragTo: position, in: geo.size)
+                    }, onEnd: {
+                        guard let dragged = dragFraction else { return }
+                        if axis == .horizontal { settings.qbPaneFractionWide = Double(dragged) }
+                        else { settings.qbPaneFractionStacked = Double(dragged) }
+                        dragFraction = nil
+                    }, onReset: {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            if axis == .horizontal { settings.qbPaneFractionWide = Double(PaneSplit.defaultFraction) }
+                            else { settings.qbPaneFractionStacked = Double(PaneSplit.defaultFraction) }
+                        }
+                    })
+                    .transition(.opacity)
+                }
             }
         }
         .clipped()
@@ -1469,19 +1486,13 @@ private struct ClientTab: View {
                 }
 
                 SettingRow(label: "Sign-in",
-                           hint: "Stored in the Keychain.") {
+                           hint: "Stored in the Keychain, in the same item as the proxy sign-in.") {
                     HStack(spacing: 8) {
                         Text(QBCredentialStore.exists() ? "Saved" : "Not set")
                             .font(.system(size: 11))
                             .foregroundStyle(QBCredentialStore.exists() ? .secondary : .tertiary)
                         Button("Set…") { editingCredentials = true }
                     }
-                }
-
-                SettingRow(label: "Keychain service",
-                           hint: "Change this to share one saved sign-in with a dedicated qBittorrent app.") {
-                    MonoField(placeholder: "\(AppSettings.bundleID).qbittorrent",
-                              text: $settings.qbKeychainService)
                 }
 
                 Divider()

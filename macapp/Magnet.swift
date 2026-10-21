@@ -6,12 +6,11 @@ struct QBCredentials: Equatable {
     var password: String
 }
 
-/// Shares the Keychain item with the qBittorrent Seedbox app on purpose — same
-/// seedbox, same login, one place to change it.
+/// qBittorrent's sign-in, in Magnet's one sign-ins item (SecretVault). It used to share
+/// an item with the separate qBittorrent app; that app is now Magnet's qBittorrent pane,
+/// and its item is only where the sign-in is copied from, once.
 enum QBCredentialStore {
-    /// Configurable because this credential is commonly shared with a dedicated
-    /// qBittorrent client app, which owns the Keychain item.
-    private static var service: String { Config.qbKeychainService }
+    private static var legacyService: String { Config.qbKeychainService }
     private static let lock = NSLock()
     private static var cached: QBCredentials?
     private static var primed = false
@@ -49,36 +48,16 @@ enum QBCredentialStore {
         }
     }
 
-    /// Whether an item exists, WITHOUT reading it.
-    ///
-    /// Attributes-only queries are not subject to the item's ACL, so this never puts
-    /// up a password box -- which matters because Settings displays this on open.
+    /// Whether a sign-in is saved, WITHOUT reading it, so this never puts up a password
+    /// box -- which matters because Settings displays this on open.
     static func exists() -> Bool {
-        let q: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        return SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess
+        SecretVault.has(\.qbittorrent, legacyService: legacyService)
     }
 
     static func save(username: String, password: String) {
-        let del: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-        ]
-        for _ in 0..<32 where SecItemDelete(del as CFDictionary) == errSecSuccess {}
-
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: username,
-            kSecValueData as String: Data(password.utf8),
-        ]
-        SecItemAdd(add as CFDictionary, nil)
-
+        SecretVault.update {
+            $0.qbittorrent = username.isEmpty ? nil : SecretVault.Pair(user: username, pass: password)
+        }
         lock.lock()
         cached = username.isEmpty ? nil : QBCredentials(username: username, password: password)
         primed = true
@@ -86,21 +65,8 @@ enum QBCredentialStore {
     }
 
     private static func read() -> QBCredentials? {
-        let q: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnAttributes as String: true,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
-              let d = item as? [String: Any],
-              let acct = d[kSecAttrAccount as String] as? String,
-              let data = d[kSecValueData as String] as? Data,
-              let pw = String(data: data, encoding: .utf8), !acct.isEmpty
-        else { return nil }
-        return QBCredentials(username: acct, password: pw)
+        guard let pair = SecretVault.contents().qbittorrent, !pair.user.isEmpty else { return nil }
+        return QBCredentials(username: pair.user, password: pair.pass)
     }
 }
 

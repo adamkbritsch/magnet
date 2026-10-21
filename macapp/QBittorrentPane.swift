@@ -784,24 +784,133 @@ private struct QBOfflineView: View {
     }
 }
 
-/// Places the qBittorrent pane and the rest of Magnet using PaneSplit's frames. A Layout
-/// rather than switching between an HStack and a VStack, so both children keep their
-/// identity when the window crosses the threshold -- nothing reloads, nothing loses
-/// its place.
+/// Places the qBittorrent pane, the rest of Magnet and (while the pane shows) the
+/// divider, using PaneSplit's frames. A Layout rather than switching between an HStack
+/// and a VStack, so the children keep their identity when the window crosses the
+/// threshold -- nothing reloads, nothing loses its place.
 struct QBSplitLayout: Layout {
     var shown: Bool
+    var fraction: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         proposal.replacingUnspecifiedDimensions()
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        guard subviews.count == 2 else { return }
-        let frames = PaneSplit.frames(for: bounds.size, shown: shown)
-        for (view, frame) in zip(subviews, [frames.pane, frames.magnet]) {
+        guard subviews.count >= 2 else { return }
+        let frames = PaneSplit.frames(for: bounds.size, shown: shown, fraction: fraction)
+        for (view, frame) in zip(subviews, [frames.pane, frames.magnet, frames.handle]) {
             view.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
                        anchor: .topLeading,
                        proposal: ProposedViewSize(width: frame.width, height: frame.height))
         }
+    }
+}
+
+/// The line between qBittorrent and the rest of Magnet. Drag it to resize; double-click
+/// it to split evenly again.
+struct PaneDivider: View {
+    let axis: PaneSplit.Axis
+    /// The pointer's distance along the split axis from the window's top-left corner.
+    let onDrag: (CGFloat) -> Void
+    let onEnd: () -> Void
+    let onReset: () -> Void
+    @State private var hot = false
+
+    var body: some View {
+        ZStack {
+            SplitHandle(axis: axis, onDrag: onDrag, onEnd: onEnd, onReset: onReset,
+                        onHot: { hot = $0 })
+            // A hairline at rest; thicker and tinted while it can be, or is being, dragged.
+            Rectangle()
+                .fill(hot ? Color.accentColor.opacity(0.85) : Theme.hairline)
+                .frame(width: axis == .horizontal ? (hot ? 2 : 1) : nil,
+                       height: axis == .vertical ? (hot ? 2 : 1) : nil)
+                .allowsHitTesting(false)
+        }
+        .animation(.easeOut(duration: 0.12), value: hot)
+    }
+}
+
+/// AppKit underneath, for the two things SwiftUI on macOS 14 does not do reliably here:
+/// holding a resize cursor over a strip that overlaps two web views (each of which sets
+/// its own cursor), and reading the pointer in window coordinates mid-drag.
+private struct SplitHandle: NSViewRepresentable {
+    let axis: PaneSplit.Axis
+    let onDrag: (CGFloat) -> Void
+    let onEnd: () -> Void
+    let onReset: () -> Void
+    let onHot: (Bool) -> Void
+
+    func makeNSView(context: Context) -> SplitHandleView { SplitHandleView() }
+
+    func updateNSView(_ view: SplitHandleView, context: Context) {
+        if view.axis != axis {
+            view.axis = axis
+            view.window?.invalidateCursorRects(for: view)
+        }
+        view.onDrag = onDrag
+        view.onEnd = onEnd
+        view.onReset = onReset
+        view.onHot = onHot
+        view.toolTip = "Drag to resize. Double-click to split evenly."
+    }
+}
+
+final class SplitHandleView: NSView {
+    var axis: PaneSplit.Axis = .horizontal
+    var onDrag: ((CGFloat) -> Void)?
+    var onEnd: (() -> Void)?
+    var onReset: (() -> Void)?
+    var onHot: ((Bool) -> Void)?
+    private var dragging = false
+    private var inside = false
+
+    private var cursor: NSCursor { axis == .horizontal ? .resizeLeftRight : .resizeUpDown }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: cursor) }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero,
+                                       options: [.inVisibleRect, .activeAlways,
+                                                 .mouseEnteredAndExited, .cursorUpdate],
+                                       owner: self))
+    }
+
+    override func cursorUpdate(with event: NSEvent) { cursor.set() }
+    override func mouseEntered(with event: NSEvent) { inside = true; onHot?(true) }
+    override func mouseExited(with event: NSEvent) {
+        inside = false
+        if !dragging { onHot?(false) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 { onReset?(); return }
+        dragging = false
+        onHot?(true)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        dragging = true
+        cursor.set()
+        onDrag?(position(of: event))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if dragging { onEnd?() }
+        dragging = false
+        onHot?(inside)
+    }
+
+    /// From the window's content view, which is where the split itself starts.
+    private func position(of event: NSEvent) -> CGFloat {
+        guard let root = window?.contentView else { return 0 }
+        let p = root.convert(event.locationInWindow, from: nil)
+        if axis == .horizontal { return p.x }
+        return root.isFlipped ? p.y : root.bounds.height - p.y
     }
 }
