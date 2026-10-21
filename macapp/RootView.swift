@@ -10,6 +10,11 @@ struct RootView: View {
     @StateObject private var automatic = AutomaticModel()
     @StateObject private var sources = AutoSourceSync()
     @StateObject private var qbPane = QBPaneController()
+    /// Files: Shuttle's seedbox, NAS and Mac browser. Its stores exist from launch so
+    /// its Settings tab works and its transfers survive it being hidden; its view is
+    /// built the first time it is shown and then kept.
+    @StateObject private var shuttle = ShuttleStores()
+    @State private var shuttleMounted = false
     @State private var generation = 0
     @ObservedObject private var settings = AppSettings.shared
     @State private var showSettings = false
@@ -62,7 +67,12 @@ struct RootView: View {
             }
         }
         .clipped()
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.surface)
+        // qBittorrent's text colour and its blue for every native control -- buttons,
+        // toggles, progress, focus rings -- so the whole window reads as one app with
+        // the qBittorrent pane beside it.
+        .foregroundStyle(Theme.text)
+        .tint(Theme.accent)
         .modifier(QBPaneTriggers(settings: settings, pane: qbPane))
         .onReceive(NotificationCenter.default.publisher(for: .qbTogglePane)) { _ in togglePane() }
         .sheet(isPresented: $showSettings, onDismiss: {
@@ -71,7 +81,7 @@ struct RootView: View {
         }) {
             SettingsPane(routes: routes, bookmarks: bookmarks, blocker: blocker,
                          plugins: plugins, automatic: automatic, sources: sources,
-                         syncSources: syncSources, initialTab: settingsTab)
+                         shuttle: shuttle, syncSources: syncSources, initialTab: settingsTab)
         }
         .task {
             guard !started else { return }
@@ -114,20 +124,37 @@ struct RootView: View {
         // Home always means the browser's home page; Back and Reload act on whichever
         // side is showing, so Cmd-R in Automatic mode never reloads a hidden page.
         .onReceive(NotificationCenter.default.publisher(for: .qbHome)) { _ in
+            guard !Self.sheetAttached else { return }
+            setShuttle(false)
             settings.mode = "manual"
             goHome()
         }
         .onReceive(NotificationCenter.default.publisher(for: .qbBack)) { _ in
-            if !settings.isAutomatic { web.goBack() }
+            if !settings.isAutomatic && !settings.shuttleShown { web.goBack() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .qbReload)) { _ in
             // The side with the keyboard: Cmd-R while working in qBittorrent reloads
             // qBittorrent, not the page beside it.
             if settings.qbPaneVisible && qbPane.hasKeyboardFocus { qbPane.toggleReload() }
+            else if settings.shuttleShown {
+                NotificationCenter.default.post(name: .shuttleRefresh, object: nil)
+            }
             else if settings.isAutomatic { Task { await automatic.refresh() } }
             else if web.isLoading { web.stop() } else { web.reload() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .qbSettings)) { _ in showSettings = true }
+        .onReceive(NotificationCenter.default.publisher(for: .qbSettings)) { _ in
+            // Settings opens on what is showing: Files' own tab while Files is up.
+            if settings.shuttleShown { settingsTab = .files }
+            showSettings = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleToggle)) { _ in toggleShuttle() }
+        // A Files dialog that arrives while Files is hidden -- a send's conflict,
+        // answered by the relay after the user had moved on -- brings Files back, so
+        // the question appears over what it is about.
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleReveal)) { _ in
+            shuttleMounted = true
+            settings.shuttleShown = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: .qbRecheck)) { _ in
             Task { await routes.resolve(); applyRoute() }
         }
@@ -143,6 +170,8 @@ struct RootView: View {
                                      sync: syncPlugins))
         .modifier(AutomaticTriggers(bookmarks: bookmarks, settings: settings,
                                     automatic: automatic, sources: sources, syncSources: syncSources))
+        .modifier(FilesTriggers(settings: settings, store: shuttle.store, automatic: automatic,
+                                mounted: $shuttleMounted))
     }
 
     private func togglePane() {
@@ -150,12 +179,58 @@ struct RootView: View {
         withAnimation(.easeInOut(duration: 0.22)) { settings.qbPaneShown.toggle() }
     }
 
+    private func toggleShuttle() { setShuttle(!settings.shuttleShown) }
+
+    /// Whether a sheet or dialog is attached to the window. Nothing may swap the
+    /// right-hand pane under one: its controls belong to the side that would be
+    /// hidden, and a sheet over the side it does not belong to cannot be answered.
+    private static var sheetAttached: Bool {
+        (NSApp.mainWindow ?? NSApp.keyWindow)?.attachedSheet != nil
+    }
+
+    private func setShuttle(_ on: Bool) {
+        guard on != settings.shuttleShown, !Self.sheetAttached else { return }
+        if on { shuttleMounted = true }
+        withAnimation(.easeInOut(duration: 0.18)) { settings.shuttleShown = on }
+    }
+
+    /// The right-hand pane: Magnet's browser (or Automatic), with Files laid over the
+    /// whole of it -- its bar included -- while Files is on.
     private func magnetColumn(inTitlebar: Bool, gutter: Bool, paneAxis: PaneSplit.Axis) -> some View {
+        let filesOn = settings.shuttleShown
+        return ZStack {
+            browserColumn(inTitlebar: inTitlebar, gutter: gutter, paneAxis: paneAxis)
+                .opacity(filesOn ? 0 : 1)
+                .allowsHitTesting(!filesOn)
+                .accessibilityHidden(filesOn)
+                // Hidden is not enough: its default buttons would still answer Return.
+                .disabled(filesOn)
+            if shuttleMounted {
+                // Not .disabled while hidden: that would reach its sheets too, and a
+                // sheet already open when Files went away would be left with every
+                // control greyed out over the window. Its few window-wide keys stand
+                // down on ShuttlePresence instead.
+                ShuttleView(stores: shuttle, inTitlebar: inTitlebar, gutter: gutter,
+                            paneAxis: paneAxis, onTogglePane: togglePane,
+                            onToggleShuttle: toggleShuttle,
+                            onSettings: { settingsTab = .files; showSettings = true })
+                    .opacity(filesOn ? 1 : 0)
+                    .allowsHitTesting(filesOn)
+                    .accessibilityHidden(!filesOn)
+            }
+        }
+        // Over both sides: a download or a magnet can finish while Files is up.
+        .overlay(alignment: .bottom) { toastView }
+        .animation(.easeInOut(duration: 0.2), value: web.toast)
+    }
+
+    private func browserColumn(inTitlebar: Bool, gutter: Bool, paneAxis: PaneSplit.Axis) -> some View {
         VStack(spacing: 0) {
             TopBar(routes: routes, web: web, bookmarks: bookmarks,
                    blocker: blocker, settings: settings, automatic: automatic,
                    showSettings: $showSettings, inTitlebar: inTitlebar, gutter: gutter,
                    paneAxis: paneAxis, onTogglePane: togglePane,
+                   onToggleShuttle: toggleShuttle,
                    onHome: { settings.mode = "manual"; goHome() })
             Divider().overlay(Theme.hairline)
             // The browser stays mounted while Automatic mode is showing, so its page,
@@ -174,10 +249,8 @@ struct RootView: View {
                     }
                 }
             }
-            .overlay(alignment: .bottom) { toastView }
-            .animation(.easeInOut(duration: 0.2), value: web.toast)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.surface)
     }
 
     @ViewBuilder
@@ -202,7 +275,7 @@ struct RootView: View {
                 ZStack {
                     WebPane(controller: web, generation: generation)
                     if web.isChallenged {
-                        Color(nsColor: .windowBackgroundColor)
+                        Theme.surface
                         VStack(spacing: 12) {
                             ProgressView().controlSize(.small)
                             Text("Clearing Cloudflare's check…")
@@ -228,8 +301,8 @@ struct RootView: View {
                 .padding(.horizontal, 14).padding(.vertical, 9)
                 .background(
                     Capsule().fill(web.toastIsError
-                                   ? Color(nsColor: .systemRed)
-                                   : Color(nsColor: .systemGreen))
+                                   ? Theme.red
+                                   : Theme.green)
                 )
                 .padding(.bottom, 22)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -303,9 +376,10 @@ private struct AutomaticTriggers: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .onAppear { automatic.setActive(settings.isAutomatic) }
+            // Polls only while Automatic is actually on screen, not covered by Files.
+            .onAppear { automatic.setActive(settings.isAutomatic && !settings.shuttleShown) }
             .onChange(of: settings.mode) { _, _ in
-                automatic.setActive(settings.isAutomatic)
+                automatic.setActive(settings.isAutomatic && !settings.shuttleShown)
                 // The main window, not the key one: with Settings open the key window is
                 // the sheet, and the hidden web view would keep the keyboard.
                 if settings.isAutomatic { (NSApp.mainWindow ?? NSApp.keyWindow)?.makeFirstResponder(nil) }
@@ -331,8 +405,53 @@ private struct AutomaticTriggers: ViewModifier {
                     $0.isVisible && !$0.isSheet && $0.occlusionState.contains(.visible)
                 })
             }
-            .onReceive(NotificationCenter.default.publisher(for: .qbModeManual)) { _ in settings.mode = "manual" }
-            .onReceive(NotificationCenter.default.publisher(for: .qbModeAutomatic)) { _ in settings.mode = "automatic" }
+            // Cmd-1 and Cmd-2 ask to see Manual or Automatic, so Files gets out of the way.
+            .onReceive(NotificationCenter.default.publisher(for: .qbModeManual)) { _ in
+                guard (NSApp.mainWindow ?? NSApp.keyWindow)?.attachedSheet == nil else { return }
+                settings.shuttleShown = false
+                settings.mode = "manual"
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .qbModeAutomatic)) { _ in
+                guard (NSApp.mainWindow ?? NSApp.keyWindow)?.attachedSheet == nil else { return }
+                settings.shuttleShown = false
+                settings.mode = "automatic"
+            }
+    }
+}
+
+/// Files' side effects.
+///
+/// - Builds its view the first time it is shown (or at launch, if it was left on).
+/// - Tells its store and its shortcuts whether it is on screen: hidden, it does not
+///   poll the relay and its window-wide Esc and menu commands stand down.
+/// - Moves the keyboard off whichever side just went away, so keys typed next cannot
+///   land in a page or file list nobody can see -- unless it is in qBittorrent,
+///   which is on screen either way.
+/// - Pauses Automatic's polling while Files covers it.
+private struct FilesTriggers: ViewModifier {
+    @ObservedObject var settings: AppSettings
+    let store: RelayStore
+    let automatic: AutomaticModel
+    @Binding var mounted: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { apply(settings.shuttleShown, resign: false) }
+            .onChange(of: settings.shuttleShown) { _, on in apply(on, resign: true) }
+    }
+
+    private func apply(_ on: Bool, resign: Bool) {
+        if on { mounted = true }
+        ShuttlePresence.shared.visible = on
+        store.setVisible(on)
+        automatic.setActive(settings.isAutomatic && !on)
+        guard resign, let window = NSApp.mainWindow ?? NSApp.keyWindow else { return }
+        var view = window.firstResponder as? NSView
+        while let current = view {
+            if current is QBClickThroughWebView { return }
+            view = current.superview
+        }
+        window.makeFirstResponder(nil)
     }
 }
 
@@ -402,6 +521,7 @@ private struct TopBar: View {
     let gutter: Bool
     let paneAxis: PaneSplit.Axis
     let onTogglePane: () -> Void
+    let onToggleShuttle: () -> Void
     let onHome: () -> Void
 
     /// Hands the page to the default browser, which reaches it directly rather than
@@ -420,7 +540,7 @@ private struct TopBar: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .bottom) {
-                VisualEffectView()
+                Theme.chrome
                 if inTitlebar { WindowDragArea() }
 
                 HStack(spacing: 10) {
@@ -450,15 +570,11 @@ private struct TopBar: View {
                             }
                             Text("1337x")
                                 .font(.system(size: 12.5, weight: .semibold))
-                                .foregroundStyle(Color.primary.opacity(0.85))
                         }
                         .padding(.horizontal, 8)
                         .frame(height: 22)
-                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Theme.pillFill))
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(QBTabButtonStyle(selected: false, resting: Theme.pillFill))
                     .help("Back to the homepage")
                     .contextMenu {
                         if let home = AppSettings.shared.home {
@@ -480,13 +596,8 @@ private struct TopBar: View {
                     // Manual is the browser; Automatic is new episodes arriving on their
                     // own. The same window, the same sites: the bar's sites are where
                     // Automatic mode searches.
-                    Picker("Mode", selection: $settings.mode) {
-                        Text("Manual").tag("manual")
-                        Text("Automatic").tag("automatic")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .controlSize(.small)
+                    QBTabs(selection: $settings.mode,
+                           options: [("manual", "Manual"), ("automatic", "Automatic")])
                     .frame(width: 168)
                     .help("Manual: browse and pick (\u{2318}1). Automatic: new episodes of the shows you follow (\u{2318}2).")
 
@@ -512,6 +623,9 @@ private struct TopBar: View {
                         web.isLoading ? web.stop() : web.reload()
                     }
                     }
+                    // Files covers this whole pane, bar included; its own bar has the
+                    // same switch in the same place.
+                    ShuttlePill(isOn: false, action: onToggleShuttle)
                     // Settings used to be reachable only from the route pill's menu
                     // and Cmd-comma, which is no way to find a seven-tab pane.
                     ChromeButton(symbol: "gearshape", help: "Settings") {
@@ -524,7 +638,7 @@ private struct TopBar: View {
 
                 if web.isLoading && !settings.isAutomatic {
                     GeometryReader { geo in
-                        Rectangle().fill(Color.accentColor)
+                        Rectangle().fill(Theme.accent)
                             .frame(width: geo.size.width * max(0.02, web.progress), height: 2)
                     }
                     .frame(height: 2)
@@ -556,7 +670,7 @@ private struct BookmarkBar: View {
 
     var body: some View {
         ZStack {
-            VisualEffectView(material: .titlebar)
+            Theme.chrome
             HStack(spacing: 0) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 0) {
@@ -642,7 +756,7 @@ private struct BookmarkBar: View {
         .padding(.vertical, 2)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(targeted ? Color.accentColor.opacity(0.16) : Color.clear)
+                .fill(targeted ? Theme.accent.opacity(0.18) : Color.clear)
         )
         .padding(.trailing, 14)
         .onDrop(of: [.utf8PlainText], isTargeted: targeting(group.category)) { providers in
@@ -651,7 +765,7 @@ private struct BookmarkBar: View {
     }
 
     private func labelStyle(targeted: Bool, hovered: Bool) -> AnyShapeStyle {
-        if targeted { return AnyShapeStyle(Color.accentColor) }
+        if targeted { return AnyShapeStyle(Theme.accent) }
         if hovered { return AnyShapeStyle(Color.primary.opacity(0.75)) }
         return AnyShapeStyle(.tertiary)
     }
@@ -690,22 +804,16 @@ private struct BookmarkBar: View {
         } label: {
             HStack(spacing: 5) {
                 Circle()
-                    .fill(Color.accentColor.opacity(0.55))
+                    .fill(hoveredID == bm.id ? Color.white.opacity(0.85) : Theme.accent)
                     .frame(width: 5, height: 5)
                 Text(bm.chipLabel)
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Color.primary.opacity(0.8))
                     .lineLimit(1)
             }
             .padding(.horizontal, 9)
             .frame(height: 21)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(hoveredID == bm.id ? Theme.pillFillHover : Theme.pillFill)
-            )
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(QBTabButtonStyle(selected: false, resting: Theme.pillFill))
         .onHover { hoveredID = $0 ? bm.id : nil }
         .help(bm.title.isEmpty ? bm.url.absoluteString : bm.title)
         .onDrag { NSItemProvider(object: bm.url.absoluteString as NSString) }
@@ -806,8 +914,8 @@ private struct ShieldPill: View {
             Image(systemName: blocker.ruleLists.isEmpty ? "shield.slash" : "shield.lefthalf.filled")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(blocker.ruleLists.isEmpty
-                                 ? Color(nsColor: .systemRed)
-                                 : Color(nsColor: .systemGreen))
+                                 ? Theme.red
+                                 : Theme.green)
             Text(blocker.ruleLists.isEmpty ? "Off" : "Blocking")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.primary.opacity(0.7))
@@ -922,7 +1030,7 @@ private struct SetupView: View {
 // MARK: - Settings
 
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case sites, connection, client, automatic, downloads, mirrors, appearance, blocking, about
+    case sites, connection, client, files, automatic, downloads, mirrors, appearance, blocking, about
     var id: String { rawValue }
 
     var title: String {
@@ -930,6 +1038,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .sites: return "Sites"
         case .connection: return "Connection"
         case .client: return "Torrent Client"
+        case .files: return "Files"
         case .automatic: return "Automatic"
         case .downloads: return "Downloads"
         case .mirrors: return "Mirrors"
@@ -944,6 +1053,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .sites: return "globe"
         case .connection: return "network"
         case .client: return "arrow.down.circle"
+        case .files: return "folder"
         case .automatic: return "tv"
         case .downloads: return "internaldrive"
         case .mirrors: return "arrow.triangle.branch"
@@ -993,6 +1103,7 @@ struct SettingsPane: View {
     @ObservedObject var plugins: SearchPluginSync
     @ObservedObject var automatic: AutomaticModel
     @ObservedObject var sources: AutoSourceSync
+    let shuttle: ShuttleStores
     let syncSources: () -> Void
     @ObservedObject private var settings = AppSettings.shared
     @Environment(\.dismiss) private var dismiss
@@ -1000,6 +1111,7 @@ struct SettingsPane: View {
 
     init(routes: RouteStore, bookmarks: BookmarkStore, blocker: ContentBlocker,
                      plugins: SearchPluginSync, automatic: AutomaticModel, sources: AutoSourceSync,
+                     shuttle: ShuttleStores,
                      syncSources: @escaping () -> Void, initialTab: SettingsTab = .sites) {
         self.routes = routes
         self.bookmarks = bookmarks
@@ -1007,6 +1119,7 @@ struct SettingsPane: View {
         self.plugins = plugins
         self.automatic = automatic
         self.sources = sources
+        self.shuttle = shuttle
         self.syncSources = syncSources
         _tab = State(initialValue: initialTab)
     }
@@ -1023,6 +1136,9 @@ struct SettingsPane: View {
                 ClientTab(settings: settings, plugins: plugins, bookmarks: bookmarks)
                     .tabItem { Label(SettingsTab.client.title, systemImage: SettingsTab.client.symbol) }
                     .tag(SettingsTab.client)
+                ShuttleSettingsView(store: shuttle.store)
+                    .tabItem { Label(SettingsTab.files.title, systemImage: SettingsTab.files.symbol) }
+                    .tag(SettingsTab.files)
                 AutomaticTab(settings: settings, automatic: automatic, sources: sources,
                              bookmarks: bookmarks, syncSources: syncSources)
                     .tabItem { Label(SettingsTab.automatic.title, systemImage: SettingsTab.automatic.symbol) }
@@ -1098,7 +1214,7 @@ private struct AutomaticTab: View {
                     HStack(spacing: 8) {
                         Text(hasToken ? "Saved" : "Not set")
                             .font(.system(size: 12))
-                            .foregroundStyle(hasToken ? Color.secondary : Color(nsColor: .systemOrange))
+                            .foregroundStyle(hasToken ? Color.secondary : Theme.orange)
                         Button(hasToken ? "Replace\u{2026}" : "Set\u{2026}") { tokenDraft = ""; editingToken = true }
                     }
                 }
@@ -1117,7 +1233,7 @@ private struct AutomaticTab: View {
                             }
                             if let r = sendResult {
                                 Text(r.text).font(.system(size: 10.5))
-                                    .foregroundStyle(r.ok ? Color(nsColor: .systemGreen) : Color(nsColor: .systemRed))
+                                    .foregroundStyle(r.ok ? Theme.green : Theme.red)
                             }
                         }
                     }
@@ -1160,11 +1276,11 @@ private struct AutomaticTab: View {
     @ViewBuilder private var loginStatus: some View {
         if let h = automatic.health {
             if h.seedboxBlocked {
-                Text(h.seedboxError ?? "The seedbox refused it").font(.system(size: 12)).foregroundStyle(Color(nsColor: .systemRed))
+                Text(h.seedboxError ?? "The seedbox refused it").font(.system(size: 12)).foregroundStyle(Theme.red)
             } else if h.seedboxLogin {
                 Text("On the NAS").font(.system(size: 12)).foregroundStyle(.secondary)
             } else {
-                Text("Not sent yet").font(.system(size: 12)).foregroundStyle(Color(nsColor: .systemOrange))
+                Text("Not sent yet").font(.system(size: 12)).foregroundStyle(Theme.orange)
             }
         } else {
             Text(automatic.error ?? "Checking\u{2026}").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -1190,7 +1306,7 @@ private struct AutomaticTab: View {
                 let row = coverage.first { $0.site == site.name }
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(row?.searched == true ? Color(nsColor: .systemGreen)
+                        .fill(row?.searched == true ? Theme.green
                               : (row == nil ? Color.secondary.opacity(0.4) : Color.secondary.opacity(0.25)))
                         .frame(width: 6, height: 6)
                     Text(site.name).font(.system(size: 11.5, weight: .medium)).frame(width: 150, alignment: .leading)
@@ -1209,7 +1325,7 @@ private struct AutomaticTab: View {
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             SecureField("Token", text: $tokenDraft).textFieldStyle(.roundedBorder)
             if let tokenError {
-                Text(tokenError).font(.system(size: 10.5)).foregroundStyle(Color(nsColor: .systemRed))
+                Text(tokenError).font(.system(size: 10.5)).foregroundStyle(Theme.red)
             }
             HStack {
                 Spacer()
@@ -1869,7 +1985,7 @@ private struct BlockingTab: View {
                     HStack(spacing: 6) {
                         Image(systemName: blocker.ruleLists.isEmpty ? "shield.slash" : "shield.lefthalf.filled")
                             .foregroundStyle(blocker.ruleLists.isEmpty
-                                             ? Color(nsColor: .systemRed) : Color(nsColor: .systemGreen))
+                                             ? Theme.red : Theme.green)
                         Text(blocker.ruleLists.isEmpty ? "Off" : "Blocking")
                             .font(.system(size: 12, weight: .medium))
                     }

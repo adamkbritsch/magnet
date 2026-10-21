@@ -1,0 +1,487 @@
+import SwiftUI
+
+/// One side of the browse area: an editable path bar, the file table, and a status
+/// line. Mirrors FileZilla's `CView` — header, list, status bar — minus the
+/// recursive-operation footer, which has no referent here.
+///
+/// `search` is nil for the seedbox pane, and that is the whole safety story for
+/// this shared view: with it nil the code path is exactly what it was before
+/// search existed. Only the NAS side can be searched, because only it is a local
+/// disk — the seedbox is rclone over FTP, where a recursive walk would be
+/// thousands of round trips.
+///
+/// The tree/list divider is NOT nested here: SplitTree owns every split, so ShuttleView
+/// composes the tree pane and this pane as siblings.
+struct BrowsePane: View {
+    @ObservedObject var browse: BrowseStore
+    let title: String
+    var connected: Bool = true
+    var onAddToQueue: ([Entry]) -> Void = { _ in }
+    var destinationName: String = ""
+    var onRename: (Entry) -> Void = { _ in }
+    var onDelete: ([Entry]) -> Void = { _ in }
+    var onNewFolder: () -> Void = { }
+    var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
+    var onBulkRename: ([Entry]) -> Void = { _ in }
+    var onReplace: (Entry) -> Void = { _ in }
+    var replacingName: String? = nil
+    var onReplaceWith: (Entry) -> Void = { _ in }
+    var onMoveToFolder: ([Entry]) -> Void = { _ in }
+    var isFavorite: (String) -> Bool = { _ in false }
+    var onToggleFavorite: (Entry) -> Void = { _ in }
+    var onFavoriteCurrentFolder: () -> Void = { }
+    /// The filesystems this pane may be pointed at. Fewer than two hides the picker.
+    var backends: [FileBackend] = []
+    var onSwitch: (FileBackend) -> Void = { _ in }
+    /// nil leaves this pane exactly as it was before favorites existed.
+    var favorites: FavoritesStore? = nil
+    /// A VALUE, not read off `favorites`, for the same reason as `searchActive`.
+    var favoritesActive: Bool = false
+    var onPickFavorite: (Favorite) -> Void = { _ in }
+    /// nil leaves this pane exactly as it was before search existed.
+    var search: SearchStore? = nil
+    /// Passed as a VALUE, not read off `search`. SwiftUI compares a view's stored
+    /// properties to decide whether to re-run its body, and an unchanged class
+    /// reference counts as unchanged — so branching on `search.active` directly
+    /// meant the pane never noticed search mode being entered or left.
+    var searchActive: Bool = false
+    var onPickResult: (Entry) -> Void = { _ in }
+    /// Set after picking a search result, so the table can scroll to it.
+    var reveal: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PathBar(browse: browse, title: title,
+                    backends: backends, onSwitch: onSwitch,
+                    favorites: favorites, favoritesActive: favoritesActive,
+                    search: search, searchActive: searchActive)
+            Divider().overlay(ShuttleTheme.hairline)
+            content
+            Divider().overlay(ShuttleTheme.hairline)
+            if let search, searchActive {
+                SearchStatusLine(search: search)
+            } else if let favorites, favoritesActive {
+                FavoritesStatusLine(favorites: favorites)
+            } else {
+                ListStatusLine(browse: browse, connected: connected)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous).fill(ShuttleTheme.cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(ShuttleTheme.hairline, lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let search, searchActive {
+            SearchPane(search: search, onPick: onPickResult)
+        } else if let favorites, favoritesActive {
+            FavoritesPane(favorites: favorites, onPick: onPickFavorite)
+        } else if let error = browse.error, browse.entries.isEmpty {
+            failure(error)
+        } else {
+            ZStack(alignment: .top) {
+                FileTable(browse: browse,
+                          paneKey: browse.mode == .seedbox ? "source" : "dest",
+                          onAddToQueue: onAddToQueue,
+                          destinationName: destinationName,
+                          onRename: onRename,
+                          onDelete: onDelete,
+                          onNewFolder: onNewFolder,
+                          onQueueRenamed: onQueueRenamed,
+                          onBulkRename: onBulkRename,
+                          onReplace: onReplace,
+                          replacingName: replacingName,
+                          onReplaceWith: onReplaceWith,
+                          onMoveToFolder: onMoveToFolder,
+                          isFavorite: isFavorite,
+                          onToggleFavorite: onToggleFavorite,
+                          onFavoriteCurrentFolder: onFavoriteCurrentFolder,
+                          reveal: reveal)
+                if let error = browse.error {
+                    Text(error)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.orange)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(ShuttleTheme.cardFill)
+                }
+                if browse.loading && browse.entries.isEmpty {
+                    ProgressView().controlSize(.small)
+                        .frame(maxWidth: .infinity).padding(.top, 24)
+                }
+            }
+        }
+    }
+
+    /// A failed listing must offer a way out. Without this the pane was a dead end:
+    /// the only recovery was the menu bar or relaunching.
+    private func failure(_ text: String) -> some View {
+        VStack(spacing: 9) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(Theme.orange)
+            Text(text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 18)
+            HStack(spacing: 8) {
+                Button("Try Again") { Task { await browse.reload() } }
+                if browse.canGoUp {
+                    Button("Go Up") { Task { await browse.goUp() } }
+                }
+            }
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func centered(_ text: String, symbol: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Which filesystem this pane is showing, and a menu to change it.
+///
+/// A menu rather than a segmented control: at `ShuttleTheme.paneMinWidth` (330pt) the path
+/// field is already tight, and a segment per choice would take three times the room
+/// to say the same thing. It replaces the static "SOURCE"/"DESTINATION" label
+/// rather than sitting beside it — naming the actual filesystem is strictly more
+/// informative than naming the pane's role, which its position already tells you.
+private struct BackendPicker: View {
+    let current: FileBackend
+    let choices: [FileBackend]
+    let onPick: (FileBackend) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(choices, id: \.kind) { choice in
+                Button {
+                    onPick(choice)
+                } label: {
+                    // A tick, not a disabled row: the current one stays clickable so
+                    // the menu never looks broken when you open it to check.
+                    if choice.kind == current.kind {
+                        Label(choice.shortLabel, systemImage: "checkmark")
+                    } else {
+                        Text(choice.shortLabel)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: current.kind == .mac ? "laptopcomputer" : "externaldrive.fill")
+                    .font(.system(size: 10))
+                Text(current.shortLabel.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 7, weight: .semibold))
+            }
+            .foregroundStyle(.secondary)
+            .fixedSize()
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Which filesystem this pane is showing")
+    }
+}
+
+
+/// FileZilla's `CViewHeader`: a label plus an editable combo of the last 20
+/// directories. Typing a path and pressing Return jumps straight there, which beats
+/// clicking down a tree when you already know the release name.
+private struct PathBar: View {
+    @ObservedObject var browse: BrowseStore
+    let title: String
+    /// The filesystems this pane may be pointed at. One (or none) means the pane is
+    /// fixed and the plain title is shown instead — see `feedback_hide_inert_ui`:
+    /// a control that cannot do anything should not be on screen at all.
+    var backends: [FileBackend] = []
+    var onSwitch: (FileBackend) -> Void = { _ in }
+    var favorites: FavoritesStore? = nil
+    var favoritesActive: Bool = false
+    var search: SearchStore? = nil
+    var searchActive: Bool = false
+
+    @State private var draft = ""
+    @State private var editing = false
+    @State private var filterOpen = false
+    @FocusState private var focused: Bool
+    @FocusState private var filterFocused: Bool
+
+    var body: some View {
+        if let search, searchActive {
+            SearchBar(search: search)
+        } else if let favorites, favoritesActive {
+            FavoritesBar(favorites: favorites) { favorites.dismiss() }
+        } else {
+            browsing
+        }
+    }
+
+    private var browsing: some View {
+        HStack(spacing: 8) {
+            ChromeButton(symbol: "chevron.left", help: "Enclosing folder (⌘↑)",
+                         enabled: browse.canGoUp) {
+                Task { await browse.goUp() }
+            }
+            if backends.count > 1 {
+                BackendPicker(current: browse.backend, choices: backends, onPick: onSwitch)
+            } else {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+
+            TextField("", text: $draft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .focused($focused)
+                .onSubmit { commit() }
+                .onChange(of: focused) { _, now in
+                    editing = now
+                    if !now { draft = browse.path }        // abandon an unsubmitted edit
+                }
+                .padding(.horizontal, 7)
+                .frame(height: 21)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(editing ? Theme.surface : ShuttleTheme.pillFill)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(editing ? ShuttleTheme.accent.opacity(0.70) : .clear,
+                                      lineWidth: 1)
+                )
+
+            if !browse.recentDirs.isEmpty {
+                Menu {
+                    // Alphabetical for display, like FileZilla's sorted MRU, while the
+                    // underlying list stays newest-first for eviction.
+                    ForEach(browse.recentDirs.sorted(), id: \.self) { p in
+                        Button(p) { Task { await browse.go(to: p) } }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Recent folders")
+            }
+
+            if let search {
+                ChromeButton(symbol: "magnifyingglass", help: "Search \(search.scopeLabel) (⌘F)") {
+                    // Leaving the other mode is part of entering this one; see
+                    // ShuttleView.enterMode.
+                    favorites?.dismiss()
+                    search.active = true
+                }
+            }
+            if let favorites {
+                ChromeButton(symbol: "star",
+                             help: "Favorites on \(favorites.scopeLabel) (⇧⌘F)") {
+                    search?.dismiss()
+                    favorites.active = true
+                }
+            }
+
+            // Filter. Client-side over the page already fetched, so typing never
+            // triggers a listing -- a cold one costs over a second.
+            //
+            // Collapsed to an icon like Search, because a permanent 96pt field left
+            // the path field almost nothing at the 330pt minimum pane width. It
+            // expands on click and stays expanded while it holds text: a filter
+            // hides rows, so it must never be possible to have one applied with no
+            // visible sign of it.
+            if filterOpen || !browse.filter.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                    TextField("Filter", text: $browse.filter)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .frame(width: 96)
+                        .focused($filterFocused)
+                    Button {
+                        browse.filter = ""
+                        filterOpen = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 6).frame(height: 21)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(ShuttleTheme.pillFill))
+                .onAppear { filterFocused = true }
+            } else {
+                ChromeButton(symbol: "line.3.horizontal.decrease",
+                             help: "Filter this folder") {
+                    filterOpen = true
+                }
+            }
+
+            if browse.loading {
+                ProgressView().controlSize(.small).scaleEffect(0.65)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .onAppear { draft = browse.path }
+        .onChange(of: browse.path) { _, new in
+            if !editing { draft = new }
+            filterOpen = false          // reload() clears the filter itself
+        }
+    }
+
+    private func commit() {
+        let p = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty, p != browse.path else { draft = browse.path; return }
+        focused = false
+        Task { await browse.go(to: p) }
+    }
+}
+
+/// The destination pane's footer: what will happen, and the button that does it.
+/// Remaining space on the chosen destination volume, so the number that would
+/// otherwise arrive as a rejection ("not enough space") is visible beforehand.
+struct FreeSpaceLabel: View {
+    @ObservedObject var store: RelayStore
+    let destPath: String
+    /// Asked instead of `store.targets` directly, so the Mac reports the volume the
+    /// path is actually on rather than nothing at all — the relay has no drop target
+    /// matching a local path, so the prefix search would simply find none.
+    var backend: FileBackend? = nil
+
+    var body: some View {
+        if let free = backend?.freeBytes(for: destPath) ?? legacyFree {
+            Text("\(humanBytes(free)) free")
+                .font(.system(size: 10.5))
+                .foregroundStyle(free < 20_000_000_000 ? Theme.orange : .secondary)
+        }
+    }
+
+    private var legacyFree: Int64? {
+        store.targets
+            .first { destPath == $0.path || destPath.hasPrefix($0.path + "/") }?
+            .freeBytes
+    }
+}
+
+struct SendBar: View {
+    /// Where the send is going, so the button says it. "Send to NAS" on a build that
+    /// can also send to the Mac is a button that lies half the time.
+    var destinationBackend: FileBackend? = nil
+    var store: RelayStore?
+    let sources: [Entry]
+    let destination: String
+    let enabled: Bool
+    let action: () -> Void
+    /// A NAS item armed to be replaced. Shown, never actioned from here: the ONLY
+    /// way to perform a replace is the seedbox item's own right-click menu, which
+    /// names what it would replace. This bar reports the armed state and offers a
+    /// way out of it, because state that outlives a sheet and is invisible would be
+    /// a trap.
+    var replacing: Entry? = nil
+    var onCancelReplace: () -> Void = { }
+
+    private var sendLabel: String {
+        "Send to " + (destinationBackend?.shortLabel ?? "NAS")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let replacing {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Theme.orange)
+                    Text("Replacing")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(replacing.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1).truncationMode(.middle)
+                    Text("— right-click what should replace it. Send is paused.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 6)
+                    Button("Cancel", action: onCancelReplace)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(ShuttleTheme.accent)
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
+            }
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                        .font(.system(size: 11.5, weight: sources.isEmpty ? .regular : .medium))
+                        .foregroundStyle(sources.isEmpty ? .secondary : .primary)
+                        .lineLimit(1).truncationMode(.middle)
+                    // The resolved destination, so there is never ambiguity about
+                    // where something lands.
+                    HStack(spacing: 8) {
+                        Text("into \(destination)")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.head)
+                        if let store {
+                            FreeSpaceLabel(store: store, destPath: destination,
+                                           backend: destinationBackend)
+                        }
+                    }
+                }
+                Spacer()
+                Button(action: action) {
+                    Text(sendLabel).font(.system(size: 12, weight: .medium))
+                }
+                // The one primary action in the window, so it carries the icon's
+                // blue as a filled button rather than a bezelled default one.
+                .buttonStyle(.borderedProminent)
+                .tint(ShuttleTheme.accent)
+                // No ⌘↩ here. A SwiftUI shortcut is window-wide, and this window
+                // also holds a browser and qBittorrent: ⌘↩ typed into either would
+                // queue a transfer. ⌘↩ is Files > Send Selection instead, which only
+                // acts while Files is on screen and the keyboard is not elsewhere.
+                .disabled(!enabled)
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+        }
+    }
+
+    private var label: String {
+        // While armed, say why the button is dead rather than leaving the user to
+        // press a greyed-out Send and guess.
+        if replacing != nil { return "Replace armed — use the right-click menu, or Cancel" }
+        switch sources.count {
+        case 0: return "Select something on the left"
+        case 1: return sources[0].name
+        default: return "\(sources.count) items"
+        }
+    }
+}

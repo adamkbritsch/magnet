@@ -18,9 +18,9 @@ check("a full-width window is split side by side", full.axis == .horizontal)
 check("qBittorrent takes the left half", full.pane == CGRect(x: 0, y: 0, width: 864, height: 1021), "\(full.pane)")
 check("Magnet takes the right half", full.magnet == CGRect(x: 864, y: 0, width: 864, height: 1021), "\(full.magnet)")
 
-let odd = PaneSplit.frames(for: CGSize(width: 1441, height: 900), shown: true)
+let odd = PaneSplit.frames(for: CGSize(width: 1601, height: 900), shown: true)
 check("an odd width leaves no gap and no overlap",
-      odd.pane.maxX == odd.magnet.minX && odd.magnet.maxX == 1441, "\(odd)")
+      odd.axis == .horizontal && odd.pane.maxX == odd.magnet.minX && odd.magnet.maxX == 1601, "\(odd)")
 
 let edge = PaneSplit.frames(for: CGSize(width: PaneSplit.sideBySideMinWidth, height: 800), shown: true)
 check("at the threshold both halves are usable", edge.axis == .horizontal && edge.pane.width >= 620)
@@ -32,10 +32,14 @@ check("a narrow window stacks qBittorrent above Magnet",
       narrow.pane == CGRect(x: 0, y: 0, width: 900, height: 500)
         && narrow.magnet == CGRect(x: 0, y: 500, width: 900, height: 500), "\(narrow)")
 
+let roomy = PaneSplit.frames(for: CGSize(width: 900, height: 700), shown: true)
+check("a narrow window keeps both minimums when it can",
+      roomy.pane.height >= PaneSplit.minPaneHeight && roomy.magnet.height >= PaneSplit.minMagnetHeight,
+      "\(roomy)")
 let short = PaneSplit.frames(for: CGSize(width: 900, height: 560), shown: true)
-check("a short narrow window keeps both minimums",
-      short.pane.height >= PaneSplit.minPaneHeight && short.magnet.height >= PaneSplit.minMagnetHeight,
-      "\(short)")
+check("one too short for both splits by proportion instead",
+      short.pane.height > 0 && short.magnet.height > short.pane.height
+        && short.pane.height + short.magnet.height == 560, "\(short)")
 let tiny = PaneSplit.frames(for: CGSize(width: 900, height: 300), shown: true)
 check("a window too short for both never goes negative",
       tiny.pane.height > 0 && tiny.magnet.height > 0 && tiny.pane.height + tiny.magnet.height == 300, "\(tiny)")
@@ -74,8 +78,9 @@ check("Magnet cannot be dragged below its minimum",
 check("a drag to x=600 stores qBittorrent's share",
       abs(PaneSplit.fraction(forDragTo: 600, in: wideSize) - 600.0 / 1728) < 0.0001)
 check("a drag past the edge stores only what the divider can reach",
-      PaneSplit.fraction(forDragTo: 5, in: wideSize) * 1728 == PaneSplit.minPaneWidth
-        && PaneSplit.fraction(forDragTo: 1720, in: wideSize) * 1728 == 1728 - PaneSplit.minMagnetWidth)
+      abs(PaneSplit.fraction(forDragTo: 5, in: wideSize) * 1728 - PaneSplit.minPaneWidth) < 0.001
+        && abs(PaneSplit.fraction(forDragTo: 1720, in: wideSize) * 1728
+               - (1728 - PaneSplit.minMagnetWidth)) < 0.001)
 let grown = PaneSplit.frames(for: CGSize(width: 2560, height: 1400), shown: true, fraction: 0.3)
 check("the share holds as the window grows", grown.pane.width == 768, "\(grown.pane)")
 let tallSize = CGSize(width: 1000, height: 1000)

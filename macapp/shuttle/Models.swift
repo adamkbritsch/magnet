@@ -1,0 +1,433 @@
+import Foundation
+
+/// Wire types for the relay's /v1 API.
+///
+/// `.convertFromSnakeCase` on the decoder means the JSON stays snake_case (matching
+/// the Python side and the README) while Swift stays camelCase, with no CodingKeys.
+enum Wire {
+    static let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.keyDecodingStrategy = .convertFromSnakeCase
+        return d
+    }()
+}
+
+struct Health: Decodable, Equatable {
+    let ok: Bool
+    let api: Int
+    let jobsActive: Int
+}
+
+struct Entry: Decodable, Identifiable, Equatable {
+    let name: String
+    let path: String
+    let isDir: Bool
+    let size: Int64?
+    let mtime: Double?
+
+    var id: String { path }
+    // The symbol lives on the model, not in the view — the house convention, so the
+    // icon and the label can never disagree.
+    var symbol: String { isDir ? "folder.fill" : "doc.fill" }
+
+    /// The tree carries only paths and names, so it synthesises an Entry to hand to
+    /// the enqueue callback. Decodable's implicit memberwise init is not accessible
+    /// from another file, hence this one.
+    init(name: String, path: String, isDir: Bool, size: Int64?, mtime: Double?) {
+        self.name = name; self.path = path; self.isDir = isDir
+        self.size = size; self.mtime = mtime
+    }
+}
+
+struct Listing: Decodable, Equatable {
+    let path: String
+    let parent: String?
+    let entries: [Entry]
+    let total: Int
+    let offset: Int
+    let limit: Int
+    let truncated: Bool
+
+    /// For `LocalBackend`, which answers the same shape from `FileManager`.
+    /// Decodable's implicit memberwise init is not visible from another file.
+    init(path: String, parent: String?, entries: [Entry],
+         total: Int, offset: Int = 0, limit: Int, truncated: Bool) {
+        self.path = path; self.parent = parent; self.entries = entries
+        self.total = total; self.offset = offset; self.limit = limit
+        self.truncated = truncated
+    }
+}
+
+/// A whole-NAS search result set.
+///
+/// Not a `Listing`: a search has no single `path` or `parent`, and its `truncated`
+/// means something different — "more matched than we returned", which is why
+/// `timedOut` is a separate fact rather than folded into it.
+struct SearchResults: Decodable, Equatable {
+    let query: String
+    let entries: [Entry]
+    /// Every match, even when only `limit` came back, so the UI can say
+    /// "500 of 7,008" instead of quietly implying 500 is all there is.
+    let total: Int
+    let limit: Int
+    let truncated: Bool
+    /// The walk stopped early, so `total` is itself incomplete. Distinct from
+    /// `truncated`: a timeout with no rows is NOT "no matches".
+    let timedOut: Bool
+    let elapsedMs: Int
+
+    /// See `Listing.init` — same reason.
+    init(query: String, entries: [Entry], total: Int, limit: Int,
+         truncated: Bool, timedOut: Bool, elapsedMs: Int) {
+        self.query = query; self.entries = entries; self.total = total
+        self.limit = limit; self.truncated = truncated
+        self.timedOut = timedOut; self.elapsedMs = elapsedMs
+    }
+}
+
+struct Target: Decodable, Identifiable, Equatable {
+    let name: String
+    let path: String
+    let freeBytes: Int64?
+    let isTestTarget: Bool
+    let exists: Bool
+
+    var id: String { path }
+    var symbol: String { isTestTarget ? "testtube.2" : "externaldrive.fill" }
+    var detail: String {
+        // _scratch is the stack's own data/test bind, so its free space is the docker
+        // volume's rather than a media volume's. Say so instead of implying otherwise.
+        if isTestTarget { return "test target" }
+        guard let freeBytes else { return "" }
+        return "\(humanBytes(freeBytes)) free"
+    }
+}
+
+enum JobKind: String, Equatable {
+    case queued, running, done, failed, cancelled, dismissed, unknown
+}
+
+struct Job: Decodable, Identifiable, Equatable {
+    let id: Int
+    let state: String
+    let isDir: Bool
+    let src: String
+    let destDir: String
+    let destName: String
+    let bytesDone: Int64
+    let bytesTotal: Int64
+    let percent: Double
+    let speed: Double
+    let eta: Int
+    let filesDone: Int
+    let filesTotal: Int
+    let error: String?
+    let destPreexisted: Bool
+    /// The item this job was sent to replace. Cleared by the relay once the old
+    /// item has actually been deleted, so STILL SET on a finished job means the
+    /// copy did not verify and both are still there.
+    let replacePath: String?
+    let createdAt: Double?
+    let updatedAt: Double?
+    let finishedAt: Double?
+    /// Epoch seconds before which the relay will not retry this job, set when a
+    /// crawling transfer is held. Absent on a job that has never been held.
+    let notBefore: Double?
+    /// How many times it has already been held, so the row can say "2nd retry"
+    /// rather than implying this is the first.
+    let holds: Int?
+
+    /// A local transfer, presented as a `Job` so the whole Transfers pane renders it
+    /// unchanged. Ids are NEGATIVE — that is the discriminator the pane's row actions
+    /// use to send Cancel/Dismiss/Retry to the local engine instead of the relay.
+    init(_ j: LocalJob) {
+        id = j.id
+        state = j.state.rawValue
+        isDir = j.filesTotal > 1
+        src = j.src
+        destDir = j.destDir
+        destName = j.name
+        bytesDone = j.bytesDone
+        bytesTotal = j.bytesTotal
+        percent = j.pct * 100
+        speed = 0
+        eta = -1
+        filesDone = j.filesDone
+        filesTotal = j.filesTotal
+        error = j.error
+        destPreexisted = false
+        replacePath = nil
+        createdAt = j.startedAt
+        updatedAt = j.startedAt
+        finishedAt = j.finishedAt
+        // Holds are a relay concept: this engine runs a job or fails it, and has
+        // nowhere to park one.
+        notBefore = nil
+        holds = nil
+    }
+
+    var kind: JobKind { JobKind(rawValue: state) ?? .unknown }
+    var isActive: Bool { kind == .queued || kind == .running }
+
+    /// Waiting out a hold rather than waiting for a free slot.
+    ///
+    /// The relay sets `not_before` when it stops a transfer that was crawling and
+    /// decides to come back to it later. A held job and an ordinary queued one look
+    /// identical without this, which left the held one with no way to be started by
+    /// hand — you could only wait or cancel.
+    var isHeld: Bool {
+        kind == .queued && (notBefore ?? 0) > Date().timeIntervalSince1970
+    }
+
+    /// "in 14 min" / "in 40s", for the row. Nil when this job is not held.
+    var heldFor: String? {
+        guard let until = notBefore else { return nil }
+        let left = until - Date().timeIntervalSince1970
+        guard left > 0 else { return nil }
+        return left >= 90 ? "in \(Int((left / 60).rounded())) min" : "in \(Int(left))s"
+    }
+    /// True for a transfer this app is performing itself. See `init(_ LocalJob)`.
+    var isLocal: Bool { id < 0 }
+
+    var symbol: String {
+        switch kind {
+        case .queued:    return "clock"
+        case .running:   return "arrow.down.circle"
+        case .done:      return "checkmark.circle.fill"
+        case .failed:    return "exclamationmark.triangle.fill"
+        case .cancelled: return "xmark.circle"
+        default:         return "circle"
+        }
+    }
+
+    var tint: ShuttleTint {
+        switch kind {
+        case .queued:    return .idle
+        case .running:   return .busy
+        case .done:      return .good
+        case .failed:    return .bad
+        case .cancelled: return .warn
+        default:         return .idle
+        }
+    }
+
+    /// Deliberately mirrors render.py's phrasing, so this app and an FTP listing of
+    /// the same job read identically when you compare them while debugging.
+    var progressText: String {
+        switch kind {
+        case .queued:
+            return "Queued"
+        case .running:
+            var bits = [String(format: "%.1f%%", percent),
+                        "\(humanBytes(bytesDone)) of \(humanBytes(bytesTotal))"]
+            if speed > 0 { bits.append("\(humanBytes(Int64(speed)))/s") }
+            bits.append("ETA \(humanETA(eta))")
+            if filesTotal > 1 { bits.append("file \(filesDone) of \(filesTotal)") }
+            return bits.joined(separator: "  ·  ")
+        case .done:
+            return "Copied \(humanBytes(bytesDone))"
+        case .failed:
+            return error ?? "Failed"
+        case .cancelled:
+            return "Cancelled at \(humanBytes(bytesDone))"
+        default:
+            return state.capitalized
+        }
+    }
+
+    /// The virtual path the copy landed at, for the row's secondary line.
+    var destPath: String { destDir + "/" + destName }
+}
+
+struct JobsPage: Decodable, Equatable {
+    let active: [Job]
+    let recent: [Job]
+    let rev: String?
+}
+
+struct TargetsPage: Decodable, Equatable { let targets: [Target] }
+
+struct VerifyResult: Decodable, Equatable {
+    struct Side: Decodable, Equatable {
+        let path: String
+        let files: Int?
+        let bytes: Int64?
+        let exists: Bool
+    }
+    let id: Int
+    let state: String
+    let src: Side
+    let dest: Side
+    let filesMatch: Bool
+    let bytesMatch: Bool
+
+    var summary: String {
+        guard let sf = src.files, let df = dest.files else { return "Could not walk both sides" }
+        let b = dest.bytes.map { humanBytes($0) } ?? "?"
+        return "\(df) of \(sf) files  ·  \(b)  ·  \(filesMatch && bytesMatch ? "match" : "MISMATCH")"
+    }
+    var ok: Bool { filesMatch && bytesMatch }
+}
+
+struct APIError: Decodable, Equatable { let error: String }
+
+
+struct RelaySettings: Decodable, Equatable {
+    let maxConcurrent: Int
+    let maxConcurrentCeiling: Int
+}
+
+
+// MARK: - Conflicts
+
+/// One destination file that already exists under the same relative path.
+struct Conflict: Decodable, Equatable, Identifiable {
+    let path: String
+    let srcSize: Int64
+    let srcMtime: Double
+    let destSize: Int64
+    let destMtime: Double
+
+    var id: String { path }
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case srcSize = "src_size"
+        case srcMtime = "src_mtime"
+        case destSize = "dest_size"
+        case destMtime = "dest_mtime"
+    }
+
+    /// For `LocalTransfers`, which reports a clash from `FileManager` attributes
+    /// rather than decoding one off the wire.
+    init(path: String, srcSize: Int64, srcMtime: Double,
+         destSize: Int64, destMtime: Double) {
+        self.path = path; self.srcSize = srcSize; self.srcMtime = srcMtime
+        self.destSize = destSize; self.destMtime = destMtime
+    }
+}
+
+/// The relay's 409 body: it refused the enqueue and is asking what to do.
+struct ConflictReport: Decodable, Equatable {
+    let destName: String
+    let conflicts: [Conflict]
+    let truncated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case destName = "dest_name"
+        case conflicts, truncated
+    }
+
+    /// See `Conflict.init` — same reason.
+    init(destName: String, conflicts: [Conflict], truncated: Bool) {
+        self.destName = destName; self.conflicts = conflicts; self.truncated = truncated
+    }
+}
+
+/// FileZilla's "Target file already exists" actions, minus the two this relay
+/// cannot honestly implement. Raw values are the relay's `on_conflict` wire values.
+///
+/// "Resume file transfer" is absent on purpose: rclone restarts an interrupted
+/// file from zero rather than resuming, so the option would be a button that lies.
+enum ConflictAction: String, CaseIterable, Identifiable {
+    case overwrite
+    case overwriteNewer         = "overwrite_newer"
+    case overwriteSize          = "overwrite_size"
+    case overwriteSizeOrNewer   = "overwrite_size_or_newer"
+    case rename
+    case skip
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .overwrite:             return "Overwrite file"
+        case .overwriteNewer:        return "Overwrite file if source file is newer"
+        case .overwriteSize:         return "Overwrite file if size differs"
+        case .overwriteSizeOrNewer:  return "Overwrite file if size differs or source file is newer"
+        case .rename:                return "Rename file…"
+        case .skip:                  return "Skip file"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .overwrite:            return "Always replaces the destination, even when the two are identical."
+        case .overwriteNewer:       return "Compares timestamps only."
+        case .overwriteSize:        return "Compares sizes only."
+        case .overwriteSizeOrNewer: return "The usual choice: replaces anything that differs, keeps a newer destination."
+        case .rename:               return "Keeps the destination file and sends this one under a new name."
+        case .skip:                 return "Leaves the destination alone and transfers nothing."
+        }
+    }
+}
+
+
+// MARK: - Seedbox connection
+
+/// The NAS's own connection to the seedbox. Credentials live on the NAS, never on
+/// this Mac and never in the repo: the relay stores them 0600 in its data dir and
+/// hands them to rclone as RCLONE_CONFIG_SEEDBOX_* so no rclone.conf is needed.
+struct SeedboxConfig: Decodable, Equatable {
+    var protocolName: String
+    var host: String
+    var port: Int
+    var user: String
+    var hasPassword: Bool
+    var root: String
+    var configured: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case protocolName = "protocol"
+        case host, port, user, root, configured
+        case hasPassword = "has_password"
+    }
+
+    static let empty = SeedboxConfig(protocolName: "ftps", host: "", port: 21,
+                                     user: "", hasPassword: false, root: "/",
+                                     configured: false)
+}
+
+struct SeedboxProbe: Decodable, Equatable {
+    let entries: Int
+    let directories: Int
+    let files: Int
+}
+
+struct SeedboxSaveResponse: Decodable, Equatable {
+    let seedbox: SeedboxConfig
+    let ok: Bool
+    let probe: SeedboxProbe?
+}
+
+/// rclone's backends, named the way a seedbox provider names them.
+enum SeedboxProtocol: String, CaseIterable, Identifiable {
+    case ftps, ftp, sftp
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .ftps: return "FTPS (explicit TLS)"
+        case .ftp:  return "FTP (plain)"
+        case .sftp: return "SFTP"
+        }
+    }
+    var defaultPort: Int { self == .sftp ? 22 : 21 }
+}
+
+
+/// What a delete is about to remove, fetched before the confirm sheet so it can say.
+struct StatResult: Decodable, Equatable {
+    let path: String
+    let isDir: Bool
+    let files: Int
+    let bytes: Int64
+    enum CodingKeys: String, CodingKey {
+        case path, files, bytes
+        case isDir = "is_dir"
+    }
+
+    /// See `Listing.init` — same reason.
+    init(path: String, isDir: Bool, files: Int, bytes: Int64) {
+        self.path = path; self.isDir = isDir; self.files = files; self.bytes = bytes
+    }
+}

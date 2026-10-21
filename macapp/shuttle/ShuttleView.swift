@@ -1,0 +1,1661 @@
+import SwiftUI
+
+/// Shuttle, covering Magnet's right-hand pane. Its stores come from ShuttleStores,
+/// which Magnet creates once, so hiding this view never tears any of them down.
+struct ShuttleView: View {
+    @StateObject private var store: RelayStore
+    @StateObject private var seedbox: BrowseStore
+    @StateObject private var dest: BrowseStore
+
+    @StateObject private var splits: SplitTreeHandle
+    @StateObject private var sourceTree: TreeStore
+    @StateObject private var destTree: TreeStore
+    /// One search per side. They look identical and are not: the NAS is a local
+    /// walk, the seedbox is one rclone recursive listing over FTP that takes ~19s
+    /// every time. Separate stores so a slow remote search cannot blank the NAS
+    /// results, and so each remembers its own query.
+    @StateObject private var search: SearchStore
+    @StateObject private var sourceSearch: SearchStore
+    /// Where this pane sits in Magnet's window, so its bar lines up with the window
+    /// buttons when it is in the titlebar row and leaves room for them when nothing
+    /// is to its left.
+    let inTitlebar: Bool
+    let gutter: Bool
+    let paneAxis: PaneSplit.Axis
+    let onTogglePane: () -> Void
+    let onToggleShuttle: () -> Void
+    /// Shuttle's settings are a tab of Magnet's Settings now.
+    let onSettings: () -> Void
+    @ObservedObject private var presence = ShuttlePresence.shared
+    @State private var tab: TransfersPane.Tab = .queued
+    @State private var booted = false
+    @State private var renaming: Entry?
+    @State private var renameDraft = ""
+    /// The relay refused an enqueue and is waiting to be told what to do.
+    @State private var conflict: PendingConflict?
+    /// Set by "always use this action", so the rest of a multi-item send stops asking.
+    @State private var conflictPolicy: ConflictAction?
+    @State private var deleting: PendingDelete?
+    @State private var deleteStat: StatResult?
+    @State private var bulkRenaming: PendingBulkRename?
+    /// The pane an open Rename/Delete sheet is acting on. Both now work on either
+    /// side, so reloading `dest` unconditionally would refresh the wrong list and
+    /// leave the seedbox still showing something that has just been removed.
+    /// Saved locations, one store per side exactly like search. The LIST is keyed
+    /// by filesystem inside the store, so both sides show the same favorites when
+    /// they are on the same backend.
+    @StateObject private var favorites: FavoritesStore
+    @StateObject private var sourceFavorites: FavoritesStore
+
+    /// Transfers this app performs itself, because the relay cannot write to the Mac.
+    @StateObject private var local: LocalTransfers
+    @State private var actionPane: BrowseStore?
+    @State private var actionTree: TreeStore?
+    /// Which side the user last acted on, so a global shortcut acts where they are
+    /// looking. Selection and navigation are the only two ways to "be" in a pane.
+    @State private var activePane: BrowseStore.Mode = .seedbox
+    /// The row a picked search result asked the table to show.
+    @State private var revealPath: String?
+    /// A NAS item armed to be replaced. Deliberately NOT BrowseStore.selection —
+    /// navigation clears that and reload prunes it, and this has to survive the
+    /// user going off to find the source. It is the app's only state that outlives
+    /// a sheet, which is why SendBar shows it the whole time it is set.
+    @State private var replacing: Entry?
+    @State private var replaceStat: StatResult?
+    @State private var replaceSourceStat: StatResult?
+    /// The seedbox item that will do the replacing. Held explicitly because it can
+    /// come from a right-clicked row, which is not necessarily the selection.
+    @State private var replaceSource: Entry?
+    /// The confirm sheet's payload. A VALUE the presentation carries, not two
+    /// optionals the body re-reads: `.sheet(isPresented:)` wrapped around
+    /// `if let target = replacing, let source = replaceSource` renders EmptyView
+    /// the instant either is nil, and macOS presents EmptyView as a blank window
+    /// with nothing in it and no way out. Carrying the pair makes that state
+    /// unrepresentable, which is why every other sheet here uses `item:`.
+    @State private var pendingReplace: PendingReplace?
+    /// A pending "move these into a folder". Holds the items and the pane, since
+    /// the sheet lists that pane's own folders as choices.
+    @State private var movingItems: [Entry] = []
+    @State private var moveFolderName = ""
+    @State private var moveChosenFolder: String?
+    @State private var showMoveSheet = false
+    /// The directory the move sheet is browsing, and its folders. Separate from the
+    /// pane: the useful destination is often somewhere else entirely.
+    @State private var movePickerPath = ""
+    @State private var movePickerFolders: [Entry] = []
+    @State private var movePickerLoading = false
+    @State private var movePickerGeneration = 0
+    /// One item stuck on a name clash, with the rest parked behind it — the same
+    /// shape as PendingConflict for sends.
+    @State private var moveClash: PendingMoveClash?
+    @State private var moveClashName = ""
+    /// Throttles the on-return reload, so alt-tabbing repeatedly is not a way to
+    /// hammer the relay.
+    @State private var lastAutoRefresh = Date.distantPast
+    /// The folder a new folder would be created in. Carried as a payload for the
+    /// same reason as `pendingReplace`: the sheet was reaching back for it with
+    /// `?? ""`, which cannot render blank but can render a sheet describing the
+    /// WRONG folder — and then create one there.
+    @State private var newFolderParent: FolderTarget?
+    @State private var newFolderName = ""
+    /// Which transfer ⌘⌫ cancels.
+    @State private var selectedTransfer: Int?
+
+    /// Cheap to call on every pass of Magnet's body: nothing is created here. The
+    /// StateObject wrappers only ever keep the first value, and it is the same object
+    /// every time anyway.
+    init(stores: ShuttleStores, inTitlebar: Bool, gutter: Bool, paneAxis: PaneSplit.Axis,
+         onTogglePane: @escaping () -> Void, onToggleShuttle: @escaping () -> Void,
+         onSettings: @escaping () -> Void) {
+        _store = StateObject(wrappedValue: stores.store)
+        _seedbox = StateObject(wrappedValue: stores.seedbox)
+        _dest = StateObject(wrappedValue: stores.dest)
+        _splits = StateObject(wrappedValue: stores.splits)
+        _sourceTree = StateObject(wrappedValue: stores.sourceTree)
+        _destTree = StateObject(wrappedValue: stores.destTree)
+        _search = StateObject(wrappedValue: stores.search)
+        _sourceSearch = StateObject(wrappedValue: stores.sourceSearch)
+        _favorites = StateObject(wrappedValue: stores.favorites)
+        _sourceFavorites = StateObject(wrappedValue: stores.sourceFavorites)
+        _local = StateObject(wrappedValue: stores.local)
+        self.inTitlebar = inTitlebar
+        self.gutter = gutter
+        self.paneAxis = paneAxis
+        self.onTogglePane = onTogglePane
+        self.onToggleShuttle = onToggleShuttle
+        self.onSettings = onSettings
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TopBar(store: store, inTitlebar: inTitlebar, gutter: gutter, paneAxis: paneAxis,
+                   onTogglePane: onTogglePane, onToggleShuttle: onToggleShuttle,
+                   onSettings: onSettings,
+                   onRefresh: { Task { await refreshAll() } })
+            Divider().overlay(ShuttleTheme.hairline)
+            if let missing = setupGap {
+                SetupCard(missing: missing, open: onSettings)
+            }
+            content
+        }
+        .background(Theme.surface)
+        // One tint for the whole tree: buttons, progress bars, focus rings and
+        // menu highlights all inherit it, so the icon's blue shows up everywhere
+        // interactive without each call site naming a colour.
+        .tint(ShuttleTheme.accent)
+        .sheet(item: $conflict) { pending in
+            ConflictSheet(report: pending.report,
+                          sourceName: (pending.src as NSString).lastPathComponent,
+                          destinationPath: pending.destDir,
+                          onCancel: {
+                              conflict = nil
+                              store.show("Transfer cancelled — nothing was overwritten",
+                                         isError: false)
+                          },
+                          onConfirm: { action, applyToAll, newName in
+                              conflict = nil
+                              if applyToAll, action != .rename { conflictPolicy = action }
+                              Task { await resolve(pending, action: action, newName: newName) }
+                          })
+        }
+        .sheet(item: $deleting) { pending in
+            DeleteSheet(items: pending.items, stat: deleteStat,
+                        onCancel: { deleting = nil; deleteStat = nil },
+                        onConfirm: {
+                            let paths = pending.items.map(\.path)
+                            deleting = nil; deleteStat = nil
+                            Task {
+                                var any = false
+                                var gone: [String] = []
+                                // Sequential, not concurrent: the relay refuses a
+                                // delete that overlaps a running transfer, and a
+                                // clear first refusal beats several racing ones.
+                                for p in paths where await store.delete(on: actingPane.backend, p) {
+                                    any = true
+                                    gone.append(p)
+                                }
+                                if any {
+                                    // The tree can delete the directory the pane is
+                                    // VIEWING, or an ancestor of it; the file list can
+                                    // only ever delete a child, which is why this did
+                                    // not arise before. Reloading a path that no longer
+                                    // exists would leave the old rows on screen —
+                                    // reload deliberately KEEPS a good listing when a
+                                    // refresh fails — so the pane would show the
+                                    // contents of a folder that is gone. Move up to the
+                                    // nearest surviving parent instead.
+                                    let pane = actingPane, tree = actingTree
+                                    if let dead = gone.first(where: {
+                                        pane.path == $0 || pane.path.hasPrefix($0 + "/")
+                                    }) {
+                                        await pane.go(to: (dead as NSString).deletingLastPathComponent)
+                                    } else {
+                                        await pane.reload()
+                                    }
+                                    if let first = paths.first {
+                                        tree.refresh((first as NSString).deletingLastPathComponent)
+                                    }
+                                }
+                            }
+                        })
+        }
+        .sheet(item: $bulkRenaming) { pending in
+            BulkRenameSheet(items: pending.items,
+                            existingNames: pending.existingNames,
+                            listingTruncated: pending.truncated,
+                            onCancel: { bulkRenaming = nil },
+                            onApply: { plan in
+                                let steps = plan.steps
+                                let parent = pending.items.first.map {
+                                    ($0.path as NSString).deletingLastPathComponent
+                                }
+                                bulkRenaming = nil
+                                Task {
+                                    let out = await store.renameMany(on: actingPane.backend, steps)
+                                    // Applied for the whole plan: a step that was
+                                    // deferred has not moved anything yet, but the
+                                    // relay will apply it, so the bookmark should
+                                    // point where the file is going to be.
+                                    let favs = favoritesFor(actingPane)
+                                    for step in steps {
+                                        let moved = ((step.path as NSString)
+                                            .deletingLastPathComponent as NSString)
+                                            .appendingPathComponent(step.newName)
+                                        favs.rename(from: step.path, to: moved)
+                                    }
+                                    // Deferred renames have changed nothing on disk,
+                                    // so reloading would just redraw the old names.
+                                    guard out.renamed > 0 else { return }
+                                    await actingPane.reload()
+                                    if let parent { actingTree.refresh(parent) }
+                                    // No failure report is needed: reload() prunes the
+                                    // selection to entries that still exist, so it
+                                    // collapses to exactly the rows that did NOT get
+                                    // renamed — still selected, ready to try again.
+                                }
+                            })
+        }
+        .sheet(item: $newFolderParent) { pending in
+            NewFolderSheet(parent: pending.path, name: $newFolderName,
+                           onCancel: { newFolderParent = nil },
+                           onConfirm: { name in
+                               let parent = pending.path
+                               newFolderParent = nil
+                               Task {
+                                   if await store.mkdir(on: dest.backend, parent: parent, name: name) {
+                                       await dest.reload()
+                                       destTree.refresh(parent)
+                                   }
+                               }
+                           })
+        }
+        .sheet(item: $pendingReplace) { pending in
+            ReplaceSheet(target: pending.target, source: pending.source,
+                         targetStat: replaceStat, sourceStat: replaceSourceStat,
+                         onCancel: { pendingReplace = nil },
+                         onConfirm: { pendingReplace = nil; sendReplacement(pending) })
+        }
+        .sheet(isPresented: $showMoveSheet) {
+            MoveToFolderSheet(items: movingItems,
+                              backend: actingPane.backend,
+                              path: movePickerPath,
+                              folders: movePickerFolders,
+                              loading: movePickerLoading,
+                              origin: (movingItems.first?.path as NSString?)?
+                                        .deletingLastPathComponent ?? "",
+                              newName: $moveFolderName,
+                              chosen: $moveChosenFolder,
+                              onNavigate: { loadMovePicker($0) },
+                              onCancel: { showMoveSheet = false; movingItems = [] },
+                              onConfirm: performMove)
+        }
+        .sheet(item: $moveClash) { clash in
+            MoveClashSheet(name: clash.name, folder: clash.folder,
+                           rename: $moveClashName,
+                           onCancel: { moveClash = nil },
+                           onOverwrite: { resolveMoveClash(overwrite: true) },
+                           onRename: { resolveMoveClash(overwrite: false) })
+        }
+        .sheet(item: $renaming) { entry in
+            RenameSheet(entry: entry, name: $renameDraft,
+                        arriving: renamingIsSeedbox ? dest.path : nil,
+                        onCancel: { renaming = nil },
+                        onConfirm: { newName in
+                            let path = entry.path
+                            let seedbox = renamingIsSeedbox
+                            renaming = nil
+                            if seedbox {
+                                downloadAndRename(entry, to: newName)
+                                return
+                            }
+                            Task {
+                                let didRename = await store.rename(on: actingPane.backend, path: path, newName: newName)
+                                if didRename {
+                                    let moved = ((path as NSString).deletingLastPathComponent
+                                                 as NSString).appendingPathComponent(newName)
+                                    favoritesFor(actingPane).rename(from: path, to: moved)
+                                }
+                                // A deferred rename changes nothing on disk yet, so
+                                // reloading would just redraw the old name.
+                                if didRename {
+                                    await actingPane.reload()
+                                    actingTree.refresh((path as NSString).deletingLastPathComponent)
+                                }
+                            }
+                        })
+        }
+        .task {
+            guard !booted else { return }
+            booted = true
+            // The Keychain's first read can cost seconds after a rebuild; start()
+            // awaits the token before the first request, and the window is already
+            // on screen by then so the cost is invisible.
+            await store.start()
+            if case .live = store.status {
+                await seedbox.restoreOrFallback()
+                await dest.restoreOrFallback()
+            }
+            store.startPolling()
+        }
+        .modifier(MenuBridge(flags: menuFlags,
+                             sourceSelection: seedbox.selection, sourcePath: seedbox.path,
+                             destSelection: dest.selection, destPath: dest.path,
+                             activePane: $activePane,
+                             onFind: { enterMode(activePane == .seedbox ? seedbox : dest,
+                                                 favorites: false) },
+                             onFavorites: { enterMode(activePane == .seedbox ? seedbox : dest,
+                                                      favorites: true) },
+                             onAddFavorite: { addCurrentFolderToFavorites() },
+                             landed: store.landedIn,
+                             onLanded: { refreshIfShowing($0.dirs) },
+                             onre: { refreshOnReturn() }))
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleRefresh)) { _ in
+            Task { await refreshAll() }
+        }
+        // Coming back to Files is what coming back to the Shuttle app used to be:
+        // the NAS side may have changed meanwhile. Same throttle.
+        .onChange(of: presence.visible) { _, visible in if visible { refreshOnReturn() } }
+        .onChange(of: sheetIsOpen) { _, open in
+            if open && !presence.visible {
+                NotificationCenter.default.post(name: .shuttleReveal, object: nil)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleSend)) { _ in trySend() }
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleUp)) { _ in
+            // Whichever pane you last touched, not always the source. The
+            // destination pane's own up-button advertises this shortcut in its
+            // tooltip, and pressing it used to move the OTHER pane.
+            let pane = activePane == .seedbox ? seedbox : dest
+            guard pane.canGoUp else {
+                store.show("Already at the top of that side", isError: false)
+                return
+            }
+            Task { await pane.goUp() }
+        }
+        // A selection that is only ever SET goes stale the moment the job it points
+        // at finishes: the row stays highlighted in the Successful tab, implying it
+        // is still actionable, and the shortcut reports "select a transfer first"
+        // when one plainly is selected. Drop it as soon as it leaves the active list.
+        //
+        // A lone transfer is NOT auto-selected any more. It used to be, so that ⌘⌫
+        // had an unambiguous target — but selection is drawn as a filled accent row,
+        // so the single-transfer case (which is most of the time) sat there looking
+        // permanently highlighted when the user had never clicked it. The shortcut
+        // keeps that convenience without the paint: see `cancelTarget`.
+        .onChange(of: store.active) { _, now in
+            if let id = selectedTransfer, !now.contains(where: { $0.id == id }) {
+                selectedTransfer = nil
+            }
+        }
+        // Selection is scoped to the queue: highlighting a row in Failed or
+        // Successful would suggest the shortcut applies there, and it does not.
+        .onChange(of: tab) { _, _ in selectedTransfer = nil }
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleCancel)) { _ in
+            // Cancel what is SELECTED. This used to cancel store.active.first, so
+            // with several transfers queued the shortcut stopped whichever happened
+            // to sort first -- a destructive action on an item the user never
+            // pointed at. With nothing selected it now does nothing and says so.
+            guard let id = cancelTarget else {
+                store.show(store.active.isEmpty
+                           ? "Nothing is transferring"
+                           : "Select a transfer first, then press ⌘⌫", isError: false)
+                return
+            }
+            guard store.active.contains(where: { $0.id == id }) else {
+                // Selected, but already finished -- "select one first" would be
+                // flatly wrong here.
+                store.show("That transfer has already finished", isError: false)
+                return
+            }
+            Task { await store.cancel(id) }
+        }
+        // Pane toggles go through isCollapsed, never by rebuilding the hierarchy.
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleToggleSourceTree)) { _ in
+            splits.toggle("source.split", pane: 0)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleToggleDestTree)) { _ in
+            splits.toggle("dest.split", pane: 0)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleToggleQueue)) { _ in
+            splits.toggle("main.rows", pane: 1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shuttleResetLayout)) { _ in
+            SplitTreeHandle.forgetLayout(keys: ShuttleTheme.splitKeys)
+            for k in ["shuttle.table.columns.source", "shuttle.table.columns.dest"] {
+                UserDefaults.standard.removeObject(forKey: k)
+            }
+            store.show("Layout reset — relaunch to apply", isError: false)
+        }
+    }
+
+    private var content: some View {
+        ZStack(alignment: .bottom) {
+            // The split tree stays mounted in EVERY status, and the offline and
+            // probing UI is drawn OVER it rather than replacing it.
+            //
+            // Swapping it out tore down the whole AppKit split hierarchy, so
+            // reconnecting rebuilt it and re-ran the restore. That was bad on its
+            // own, but it also changed the root's constraints enough for a tiled
+            // window to leave its tile and grow -- measured going offline:
+            // 865x1014 -> 865x1353, origin dropped to y=-269, below the screen.
+            // The rebuilt tree then restored into that taller window and the
+            // transfers pane swallowed every extra point. Keeping the tree mounted
+            // means losing the relay cannot move a divider or resize the window.
+            //
+            // Every boundary below is a real, draggable, persisted NSSplitView
+            // divider. SwiftUI's HSplitView/VSplitView cannot do this: they have
+            // no autosave name, no divider binding, and no holding-priority
+            // equivalent, so nothing about their geometry survives a relaunch.
+            SplitTree(root: splitLayout, hitSlop: ShuttleTheme.dividerHitSlop, handle: splits)
+
+            statusOverlay
+
+            if let toast = store.toast {
+                Text(toast.text)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(
+                        Capsule().fill(toast.isError
+                                       ? Theme.red
+                                       : Theme.green)
+                    )
+                    .padding(.bottom, 22)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: store.toast)
+    }
+
+    /// Covers the panes while there is no relay. Opaque, because the panes behind it
+    /// still hold the last listing and a half-visible stale file list reads as live.
+    @ViewBuilder
+    private var statusOverlay: some View {
+        switch store.status {
+        case .live:
+            EmptyView()
+        case .probing:
+            centered {
+                ProgressView().controlSize(.small)
+                Text("Reaching the relay…").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .background(Theme.surface)
+        case .offline(let reason):
+            OfflineView(reason: reason, base: store.baseURL, visible: presence.visible,
+                        onRetry: { Task { await retry() } },
+                        onSettings: onSettings)
+                .background(Theme.surface)
+        }
+    }
+
+    // MARK: - Layout
+
+    /// The pane hierarchy. Rebuilt every body pass; SplitTree pushes the fresh leaf
+    /// views into the existing hosting views positionally, so the AppKit split
+    /// hierarchy is built once and never torn down.
+    ///
+    /// The leaf SHAPE must stay constant between passes — hiding a pane goes through
+    /// `isCollapsed`, never by omitting a SplitChild, or leaf updates stop silently.
+    private var splitLayout: SplitNode {
+        .split(axis: .rows, key: "main.rows", children: [
+            SplitChild(SplitPaneSpec(min: ShuttleTheme.browseMin,
+                                     holdingPriority: ShuttleTheme.Hold.absorbs),
+                       .split(axis: .columns, key: "main.browse", children: [
+                        // Equal priorities give FileZilla's gravity 0.5: the two
+                        // panes share growth instead of one pinning to its minimum.
+                        SplitChild(SplitPaneSpec(min: ShuttleTheme.paneMinWidth,
+                                                 holdingPriority: ShuttleTheme.Hold.absorbs),
+                                   column(key: "source.split", search: sourceSearch, browse: seedbox,
+                                          tree: sourceTree, title: "SEEDBOX",
+                                          treeRoot: "/seedbox",
+                                          // Starts collapsed so the seedbox tree's
+                                          // cold listing cost is never paid unasked.
+                                          startsCollapsed: true) { EmptyView() }),
+                        SplitChild(SplitPaneSpec(min: ShuttleTheme.paneMinWidth,
+                                                 holdingPriority: ShuttleTheme.Hold.absorbs),
+                                   column(key: "dest.split", search: search, browse: dest,
+                                          tree: destTree, title: "DESTINATION",
+                                          treeRoot: dest.backend.root,
+                                          // NAS volumes are a small, near-static set.
+                                          startsCollapsed: false) {
+                                            SendBar(destinationBackend: dest.backend,
+                                                    store: store,
+                                                    sources: seedbox.selectedEntries,
+                                                    destination: dest.path,
+                                                    enabled: canSend,
+                                                    action: trySend,
+                                                    replacing: replacing,
+                                                    onCancelReplace: cancelReplace)
+                                          }),
+                       ])),
+            SplitChild(SplitPaneSpec(min: ShuttleTheme.queueMin,
+                                     canCollapse: true,
+                                     holdingPriority: ShuttleTheme.Hold.holdsFirmly,
+                                     seed: ShuttleTheme.queueSeed)) {
+                TransfersPane(store: store, local: local, tab: $tab, selected: $selectedTransfer)
+            },
+        ])
+    }
+
+    /// One side's tree/list split. The tree pane can collapse (that is how the View
+    /// menu hides it) but is NEVER omitted from the hierarchy: SplitTree pushes leaf
+    /// views positionally, so a changing leaf count would silently stop all updates.
+    private func column(key: String,
+                        search: SearchStore,
+                        browse: BrowseStore,
+                        tree: TreeStore,
+                        title: String,
+                        treeRoot: String,
+                        startsCollapsed: Bool,
+                        @ViewBuilder footer: @escaping () -> some View) -> SplitNode {
+        .split(axis: .rows, key: key, children: [
+            SplitChild(SplitPaneSpec(min: ShuttleTheme.treeMin,
+                                     canCollapse: true,
+                                     // 251 HOLDS: the list below absorbs growth while
+                                     // the tree keeps its height. Measured; the
+                                     // intuitive assignment is backwards.
+                                     holdingPriority: ShuttleTheme.Hold.holds,
+                                     startsCollapsed: startsCollapsed,
+                                     seed: ShuttleTheme.treeSeed)) {
+                treePane(tree: tree, browse: browse, root: treeRoot)
+            },
+            SplitChild(SplitPaneSpec(min: ShuttleTheme.listMin,
+                                     holdingPriority: ShuttleTheme.Hold.absorbs)) {
+                VStack(spacing: 0) {
+                    let favs = browse.mode == .seedbox ? sourceFavorites : favorites
+                    BrowsePane(browse: browse, title: title,
+                               onAddToQueue: { enqueue($0) },
+                               destinationName: destinationLabel,
+                               onRename: { beginRename($0, in: browse, tree: tree) },
+                               onDelete: { beginDelete($0, in: browse, tree: tree) },
+                               onNewFolder: { beginNewFolder(dest.path) },
+                               onQueueRenamed: { e, name in enqueue([e], as: name) },
+                               onBulkRename: { beginBulkRename($0, in: browse, tree: tree) },
+                               onReplace: { beginReplace($0) },
+                               replacingName: replacing?.name,
+                               onReplaceWith: { confirmReplace(with: $0) },
+                               onMoveToFolder: { beginMoveToFolder($0, in: browse, tree: tree) },
+                               isFavorite: { favs.contains($0) },
+                               onToggleFavorite: { favs.toggle($0) },
+                               onFavoriteCurrentFolder: {
+                                   favs.contains(browse.path)
+                                       ? favs.remove(browse.path)
+                                       : favs.addPath(browse.path)
+                               },
+                               backends: backendChoices(for: browse),
+                               onSwitch: { switchPane(browse, tree: tree,
+                                                      search: search, to: $0) },
+                               favorites: favs,
+                               favoritesActive: favs.active,
+                               onPickFavorite: { pickFavorite($0, in: browse, tree: tree) },
+                               search: search,
+                               searchActive: search.active,
+                               onPickResult: { pickResult($0, in: browse, tree: tree) },
+                               reveal: revealPath)
+                    footer()
+                }
+            },
+        ])
+    }
+
+    private func treePane(tree: TreeStore, browse: BrowseStore, root: String) -> some View {
+        DirTreeView(tree: tree, browse: browse, root: root,
+                    onAddToQueue: { enqueue([$0]) },
+                    destinationName: destinationLabel,
+                    onRename: { beginRename($0, in: browse, tree: tree) },
+                    onDelete: { beginDelete([$0], in: browse, tree: tree) },
+                    onNewFolder: { beginNewFolder($0) })
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous).fill(ShuttleTheme.listFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(ShuttleTheme.hairline, lineWidth: 1)
+            )
+    }
+
+    /// A destination must be a real folder inside a drop target. `/queue` itself is
+    /// the list of targets, not a target, so it is not a valid destination.
+    /// Send is disabled while a replace is armed, and that is not fussiness — it
+    /// is the exact trap that lost a replace: with something armed, pressing Send
+    /// did a PLAIN copy, silently ignoring the armed state, so the new file landed
+    /// beside the old one instead of instead of it. Arming and sending are two
+    /// different intentions and the button cannot express both.
+    ///
+    /// This gates ⌘↩ and the Transfer menu item too, since both read `canSend`.
+    private var canSend: Bool {
+        replacing == nil
+            && !seedbox.selectedEntries.isEmpty
+            && dest.backend.isInsideRoot(dest.path)
+    }
+
+    /// What a pane may be switched to.
+    ///
+    /// The destination always offers both. The SOURCE offers a choice only while the
+    /// destination is the Mac — with the NAS on the right, a NAS source would mean
+    /// NAS-to-NAS, which is what Move already is, so the control would be inert.
+    private func backendChoices(for pane: BrowseStore) -> [FileBackend] {
+        let all: [FileBackend] = [store.seedboxBackend, store.nasBackend, store.macBackend]
+        // Never offer the filesystem the OTHER pane is on: same-to-same is not a
+        // transfer, it is Move, which has its own menu item and does not need a
+        // second pane. Anything left with one choice hides its picker entirely.
+        let other = (pane === dest ? seedbox : dest).kind
+        return all.filter { $0.kind != other }
+    }
+
+    /// Point a pane — listing, tree and search together — at another filesystem.
+    private func switchPane(_ pane: BrowseStore, tree: TreeStore,
+                            search: SearchStore, to next: FileBackend) {
+        guard next.kind != pane.kind else { return }
+        // An armed replace names an item on the pane that is about to change under
+        // it, and a parked conflict holds paths from the old tree.
+        cancelReplace()
+        conflict = nil
+        tree.switchTo(next)
+        search.switchTo(next)
+        (pane === dest ? favorites : sourceFavorites).switchTo(next)
+        Task {
+            await pane.switchTo(next)
+            // Both panes may not sit on the same filesystem. Whichever side was NOT
+            // just changed gives way, moving to the first choice that is still free.
+            let others = pane === dest
+                ? (other: seedbox, tree: sourceTree, search: sourceSearch)
+                : (other: dest, tree: destTree, search: search)
+            if others.other.kind == next.kind {
+                let fallback: FileBackend = next.kind == .seedbox
+                    ? store.nasBackend : store.seedboxBackend
+                others.tree.switchTo(fallback)
+                others.search.switchTo(fallback)
+                await others.other.switchTo(fallback)
+            }
+        }
+    }
+
+    /// What is still missing before Shuttle can do anything, or nil once it can.
+    ///
+    /// Derived from state the app already keeps current — the relay's live status
+    /// and the seedbox config the relay reports — rather than a second copy of the
+    /// Setup checks. A banner that needed its own probes would either be stale or
+    /// be probing constantly.
+    private var setupGap: String? {
+        // Judged from LOCAL facts, because "have you set this up?" and "is the NAS
+        // reachable right now?" are different questions and only the first one this
+        // banner is for. An address and a token are both present exactly when setup
+        // has been done, and neither needs the relay to answer.
+        //
+        // The earlier version keyed off the relay being live, so any blip on a
+        // working install accused it of being unconfigured -- on a screen that
+        // already says Offline three times over.
+        if store.baseURL.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "Files needs the address of your relay"
+        }
+        if TokenStore.current == nil {
+            return "Files needs the relay's API token"
+        }
+        // Only meaningful once the relay is actually answering: while it is not,
+        // `seedbox` is whatever was last reported, and treating that as fact would
+        // put up a second wrong banner.
+        guard case .live = store.status else { return nil }
+        if !store.seedbox.configured { return "The remote server has not been set up yet" }
+        return nil
+    }
+
+    /// Jump to a saved location. Same body as `pickResult`, deliberately: a
+    /// favorite and a search hit are the same kind of answer, so they must land the
+    /// same way — the enclosing folder open, the row selected and centred.
+    private func pickFavorite(_ fav: Favorite, in pane: BrowseStore, tree: TreeStore) {
+        // Not named `store`: that is the RelayStore, and shadowing it here would
+        // make the toast below read as if it came from the favorites list.
+        let favs = pane.mode == .seedbox ? sourceFavorites : favorites
+        favs.dismiss()
+        let parent = (fav.path as NSString).deletingLastPathComponent
+        revealPath = fav.path
+        Task {
+            await pane.go(to: parent, revealing: fav.path)
+            tree.refresh(parent)
+            // A favorite outlives the thing it points at. Say so rather than
+            // leaving the pane looking merely empty.
+            if pane.error == nil, !pane.entries.contains(where: { $0.path == fav.path }) {
+                store.show("“\(fav.name)” is no longer there", isError: true)
+            }
+        }
+    }
+
+    /// Only one pane mode at a time. Search and favorites both replace the path bar
+    /// AND the pane body, so with both set the branch ORDER would silently decide
+    /// which you got — the kind of bug that looks like the click did nothing.
+    private func enterMode(_ pane: BrowseStore, favorites wantFavorites: Bool) {
+        let isSource = pane.mode == .seedbox
+        let s = isSource ? sourceSearch : search
+        let f = isSource ? sourceFavorites : favorites
+        s.active = !wantFavorites
+        f.active = wantFavorites
+    }
+
+    /// ⌘D on whichever pane is active.
+    private func addCurrentFolderToFavorites() {
+        let pane = activePane == .seedbox ? seedbox : dest
+        let favs = pane.mode == .seedbox ? sourceFavorites : favorites
+        if favs.contains(pane.path) {
+            favs.remove(pane.path)
+            store.show("Removed from favorites", isError: false)
+        } else {
+            favs.addPath(pane.path)
+            store.show("Added to favorites", isError: false)
+        }
+    }
+
+    /// The favorites list for whichever filesystem this pane is showing.
+    private func favoritesFor(_ pane: BrowseStore) -> FavoritesStore {
+        pane.mode == .seedbox ? sourceFavorites : favorites
+    }
+
+    private var actingPane: BrowseStore { actionPane ?? dest }
+    private var actingTree: TreeStore { actionTree ?? destTree }
+
+    /// A search result is find-only, so picking one is purely navigation.
+    ///
+    /// A folder IS the place you were looking for, so go inside it. A file is not,
+    /// so go to its folder and select it there — which is what `revealing:` is for.
+    /// Search mode closes but the results are kept, so ⌘F brings them straight back
+    /// without paying for a second walk.
+    private func pickResult(_ entry: Entry, in pane: BrowseStore, tree: TreeStore) {
+        (pane.mode == .seedbox ? sourceSearch : search).dismiss()
+        // Always the CONTAINING folder, for a folder result as much as a file:
+        // "show me where this is" is the question search answers, and opening a
+        // folder answers a different one. The item is selected on arrival, so what
+        // you searched for is the thing highlighted.
+        let parent = (entry.path as NSString).deletingLastPathComponent
+        revealPath = entry.path
+        Task {
+            await pane.go(to: parent, revealing: entry.path)
+            tree.refresh(parent)
+        }
+    }
+
+    /// What ⌘⌫ acts on: whatever is selected, or the only active transfer when there
+    /// is exactly one.
+    ///
+    /// Resolved here rather than by assigning to `selectedTransfer`, which is what it
+    /// used to do. Writing it into the selection meant the row rendered as selected,
+    /// and with a single transfer running that is a permanently blue row nobody
+    /// clicked. Nothing is ambiguous about one transfer, so the shortcut can still
+    /// find it without the app claiming it is highlighted.
+    private var cancelTarget: Int? {
+        if let selectedTransfer { return selectedTransfer }
+        return store.active.count == 1 ? store.active[0].id : nil
+    }
+
+    /// Everything the menu bar validates against, as one Equatable value so a single
+    /// onChange keeps all four in step.
+    private var menuFlags: MenuFlags {
+        var f = MenuFlags()
+        f.canSend = canSend
+        f.canGoUp = (activePane == .seedbox ? seedbox : dest).canGoUp
+        f.hasSelectedTransfer = cancelTarget != nil
+        if case .live = store.status { f.isLive = true }
+        return f
+    }
+
+    private func trySend() {
+        // ⌘↩ with nothing selected used to return silently from enqueue's guard —
+        // no toast, no sheet, nothing. Same precedent as the ⌘⌫ handler above.
+        guard !seedbox.selectedEntries.isEmpty else {
+            store.show(seedbox.selection.isEmpty
+                       ? "Select something on the seedbox side first, then press ⌘↩"
+                       : "Everything selected is hidden by the filter", isError: false)
+            return
+        }
+        enqueue(seedbox.selectedEntries)
+    }
+
+    /// The one path every "add to queue" goes through: the Send button, ⌘↩, the file
+    /// list's context menu and the tree's.
+    /// `as` renames the item on arrival. It is applied at ENQUEUE, as the job's
+    /// destination name, not as a rename afterwards.
+    ///
+    /// That is deliberate and it is the safer of the two. Setting the name up front
+    /// means the conflict check runs against the name the file will actually have,
+    /// so a clash is caught before anything moves. Transferring first and renaming
+    /// after would discover the clash only once the bytes had landed — a failed
+    /// rename at the end of a 40GB copy, with the file sitting under the wrong name.
+    /// rclone writes straight to the final name either way, so the end state is
+    /// identical.
+    private func enqueue(_ sources: [Entry], as destName: String? = nil) {
+        guard !sources.isEmpty else { return }
+        guard dest.backend.isInsideRoot(dest.path) else {
+            store.show(dest.backend.pickAFolderHint, isError: true)
+            return
+        }
+        let destPath = dest.path
+        // One action that adds MORE than one item queues them in name order, so
+        // Episode 2 transfers before Episode 10 whatever order the pane happened to
+        // hand them over in — the pane's own order is the relay's listing order, which
+        // is plain lexicographic and puts Episode 10 first.
+        //
+        // Deliberately scoped to a multi-item add. A single add has nothing to order,
+        // and two separate adds keep their own arrival order rather than the queue
+        // being silently re-sorted behind the user. Name order specifically, not
+        // whichever column the table happens to be sorted by.
+        let ordered = sources.count > 1
+            ? sources.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            : sources
+        // A fresh Send starts asking again: "always use this action" is scoped to one
+        // send, exactly like FileZilla's "Apply to current queue only".
+        conflictPolicy = nil
+        Task {
+            // POST /v1/jobs takes one src per call, so N selected items are N calls,
+            // each through the relay's own validate_request gate.
+            for src in ordered {
+                // Nil policy means "ask": the relay scans the destination and answers
+                // 409 rather than silently overwriting. The local engine answers the
+                // same question from `FileManager` before it queues anything.
+                let report = await queueOne(path: src.path, name: src.name,
+                                            destDir: destPath,
+                                            onConflict: conflictPolicy,
+                                            destName: destName)
+                if let report {
+                    // Park the rest of the selection behind the sheet: answering it
+                    // resumes them with whatever was chosen.
+                    conflict = PendingConflict(
+                        src: src.path, destDir: destPath, report: report,
+                        remaining: Array(ordered.drop(while: { $0.path != src.path }).dropFirst()))
+                    return
+                }
+            }
+            tab = .queued
+        }
+    }
+
+    /// Queue one item, on whichever engine owns the destination.
+    ///
+    /// The relay moves bytes between two machines it can both reach; it cannot write
+    /// to this Mac, so a Mac destination is transferred by this process instead. The
+    /// two answer the same way — nil for queued, a `ConflictReport` for "something is
+    /// already there" — which is what lets one conflict sheet serve both.
+    private func queueOne(path: String, name: String, destDir: String,
+                          onConflict: ConflictAction?,
+                          destName: String? = nil) async -> ConflictReport? {
+        // Downloading ONTO the Mac: this app pulls, because the relay cannot write
+        // here.
+        if dest.kind == .mac {
+            if onConflict == nil,
+               let report = local.clash(for: name, in: destDir, destName: destName) {
+                return report
+            }
+            local.send(src: path, srcName: name, destDir: destDir,
+                       destName: destName, onConflict: onConflict,
+                       direction: .download)
+            return nil
+        }
+        // Uploading FROM the Mac: this app pushes, because the relay cannot read
+        // this disk. The clash question goes to the relay, which is the side that
+        // knows what is already there.
+        if seedbox.kind == .mac {
+            local.send(src: path, srcName: name, destDir: destDir,
+                       destName: destName, onConflict: onConflict,
+                       direction: .upload)
+            return nil
+        }
+        // Both ends are the relay's, so it moves the bytes itself.
+        return await store.send(src: path, destDir: destDir,
+                                onConflict: onConflict, destName: destName)
+    }
+
+    /// Applies the sheet's answer to the item that tripped it, then continues with
+    /// whatever was left of the selection.
+    private func resolve(_ pending: PendingConflict,
+                         action: ConflictAction, newName: String) async {
+        // Skip is NOT short-circuited here. FileZilla's "Skip file" skips the
+        // clashing FILE, not the whole transfer -- and for a release folder where
+        // only some files collide, the rest must still go. Sending it to the relay
+        // as --ignore-existing reproduces that; returning early would silently drop
+        // every non-conflicting file in the directory.
+        _ = await queueOne(path: pending.src,
+                           name: (pending.src as NSString).lastPathComponent,
+                           destDir: pending.destDir,
+                           onConflict: action,
+                           destName: action == .rename ? newName : nil)
+        for src in pending.remaining {
+            let report = await queueOne(path: src.path, name: src.name,
+                                        destDir: pending.destDir,
+                                        onConflict: conflictPolicy)
+            if let report {
+                conflict = PendingConflict(
+                    src: src.path, destDir: pending.destDir, report: report,
+                    remaining: Array(pending.remaining
+                        .drop(while: { $0.path != src.path }).dropFirst()))
+                return
+            }
+        }
+        tab = .queued
+    }
+
+    /// Asks the relay what is actually there before showing the sheet, so the
+    /// confirmation can state the size and file count rather than just a name.
+    /// For a multi-item delete the totals are summed across the selection — the
+    /// number that makes someone stop and check is the combined one.
+    private func beginDelete(_ items: [Entry], in pane: BrowseStore, tree: TreeStore) {
+        guard !items.isEmpty else { return }
+        actionPane = pane; actionTree = tree
+        deleteStat = nil
+        deleting = PendingDelete(items: items)
+        Task {
+            var files = 0, bytes: Int64 = 0
+            for e in items {
+                guard let s = await store.statFor(on: pane.backend, e.path) else { continue }
+                files += s.files
+                bytes += s.bytes
+            }
+            deleteStat = StatResult(path: items[0].path,
+                                    isDir: items.count > 1 ? true : items[0].isDir,
+                                    files: files, bytes: bytes)
+        }
+    }
+
+    /// Synchronous, unlike beginDelete: everything the sheet needs is already in the
+    /// listing we are looking at.
+    ///
+    /// `dest.entries` and not `visibleEntries` — a row hidden by the pane's filter
+    /// still occupies its name on disk, so filtering here would miss real clashes.
+    private func beginBulkRename(_ items: [Entry], in pane: BrowseStore, tree: TreeStore) {
+        guard items.count > 1 else { return }
+        actionPane = pane; actionTree = tree
+        bulkRenaming = PendingBulkRename(
+            items: items,
+            existingNames: Set(pane.entries.map(\.name)),
+            truncated: pane.truncatedTotal != nil)
+    }
+
+    /// Arm a NAS item for replacement. Nothing is queued and nothing is deleted
+    /// here — this only says "the next thing you pick on the left replaces this".
+    private func beginReplace(_ entry: Entry) {
+        replacing = entry
+        replaceStat = nil
+        replaceSource = nil
+        replaceSourceStat = nil
+        pendingReplace = nil
+        Task { replaceStat = await store.statFor(on: dest.backend, entry.path) }
+        store.show("Replacing \(entry.name) — right-click what should replace it", isError: false)
+    }
+
+    private func cancelReplace() {
+        replacing = nil
+        replaceStat = nil
+        replaceSource = nil
+        replaceSourceStat = nil
+        pendingReplace = nil
+    }
+
+    /// The seedbox pane's "Replace X" menu item — the ONE way to perform a replace.
+    /// It passes the row that was right-clicked, not the selection, which may be
+    /// something else entirely. Deliberately not reachable from a button, a
+    /// double-click or a shortcut: the menu item names the item it would delete,
+    /// and that naming is the confirmation.
+    private func confirmReplace(with source: Entry) {
+        // Binds the target rather than asserting it is non-nil, so the pair that
+        // reaches the sheet is the pair that passed this check.
+        guard let target = replacing else { return }
+        replaceSource = source
+        replaceSourceStat = nil
+        pendingReplace = PendingReplace(target: target, source: source)
+        Task { replaceSourceStat = await store.statFor(on: seedbox.backend, source.path) }
+    }
+
+    /// Queue the copy, carrying the "and then delete that" instruction with it.
+    ///
+    /// Not `enqueue(_:as:)`: that lands things in `dest.path`, and a replacement has
+    /// to land in the ARMED item's own folder, which may not be where the right pane
+    /// is pointed. `overwrite` because the default policy asks, and a replace has
+    /// already been confirmed once.
+    private func sendReplacement(_ pending: PendingReplace) {
+        let destDir = (pending.target.path as NSString).deletingLastPathComponent
+        let oldPath = pending.target.path
+        cancelReplace()
+        Task {
+            _ = await store.send(src: pending.source.path, destDir: destDir,
+                                 onConflict: .overwrite, replace: oldPath)
+            tab = .queued
+            await dest.reload()
+        }
+    }
+
+    private func beginMoveToFolder(_ items: [Entry], in pane: BrowseStore, tree: TreeStore) {
+        guard !items.isEmpty else { return }
+        actionPane = pane; actionTree = tree
+        movingItems = items
+        moveFolderName = ""
+        moveChosenFolder = nil
+        movePickerFolders = []
+        showMoveSheet = true
+        loadMovePicker(pane.path)
+    }
+
+    /// List the folders in whatever directory the sheet is showing.
+    ///
+    /// Generation-counted like reload(): browsing is a few clicks a second and a
+    /// slow listing landing late would repopulate the list under a directory the
+    /// user has already left.
+    private func loadMovePicker(_ path: String) {
+        movePickerPath = path
+        moveChosenFolder = nil
+        movePickerGeneration &+= 1
+        let mine = movePickerGeneration
+        movePickerLoading = true
+        let selected = Set(movingItems.map(\.path))
+        Task {
+            let listing = await actingPane.backend.browse(path, limit: 5000)
+            guard mine == movePickerGeneration else { return }
+            movePickerLoading = false
+            guard case .listing(let l) = listing else {
+                movePickerFolders = []
+                return
+            }
+            // A folder cannot be moved into itself, so the selection never appears
+            // as a destination.
+            movePickerFolders = l.entries
+                .filter { $0.isDir && !selected.contains($0.path) }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+    }
+
+    /// Resolve the chosen folder — existing, or created — then move everything in.
+    private func performMove() {
+        let items = movingItems
+        let pane = actingPane, tree = actingTree
+        // The directory the sheet is SHOWING, which may be nowhere near the pane —
+        // that is the whole point of letting it navigate.
+        let parent = movePickerPath
+        let picked = moveChosenFolder
+        let typed = moveFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        movingItems = []
+        showMoveSheet = false
+        guard !items.isEmpty else { return }
+
+        Task {
+            var folder: String
+            if let picked {
+                folder = picked
+            } else if typed.isEmpty {
+                // "Move Here": the browsed directory itself. This is what lets an
+                // item move UP to sit beside the folder it was inside.
+                folder = parent
+            } else {
+                guard let made = await store.folderFor(on: pane.backend, parent: parent, name: typed)
+                else { return }
+                folder = made.path
+                if !made.created {
+                    store.show("Using the folder “\(typed)” that was already here",
+                               isError: false)
+                }
+            }
+            await moveEach(items, into: folder, pane: pane, tree: tree)
+        }
+    }
+
+    /// Sequential, like the delete loop: one clear refusal beats several racing
+    /// ones, and a clash has to be answered before the rest continue.
+    private func moveEach(_ items: [Entry], into folder: String,
+                          pane: BrowseStore, tree: TreeStore) async {
+        var moved = 0
+        for (i, item) in items.enumerated() {
+            switch await pane.backend.move(item.path, into: folder, newName: nil, overwrite: false) {
+            case .moved:
+                moved += 1
+                // A move is a rename of the path, so a bookmark follows it for the
+                // same reason.
+                favoritesFor(pane).rename(
+                    from: item.path,
+                    to: (folder as NSString).appendingPathComponent(item.name))
+            case .clash(let name, let existing):
+                // Park the remainder behind the sheet, exactly as a send conflict
+                // parks the rest of a selection.
+                moveClashName = name
+                moveClash = PendingMoveClash(item: item, folder: folder, name: name,
+                                             existing: existing,
+                                             remaining: Array(items.dropFirst(i + 1)),
+                                             movedSoFar: moved)
+                await finishMove(moved: moved, pane: pane, tree: tree, folder: folder)
+                return
+            case .refused(let why):
+                store.show(why, isError: true)
+                await finishMove(moved: moved, pane: pane, tree: tree, folder: folder)
+                return
+            case .unreachable(let why):
+                store.show(why, isError: true)
+                return
+            }
+        }
+        store.show(moved == 1 ? "Moved 1 item" : "Moved \(moved) items", isError: false)
+        await finishMove(moved: moved, pane: pane, tree: tree, folder: folder)
+    }
+
+    private func finishMove(moved: Int, pane: BrowseStore, tree: TreeStore,
+                            folder: String) async {
+        guard moved > 0 else { return }
+        // Reveal where they went, but only when that is somewhere this pane can
+        // show. Moving into a folder elsewhere in the volume leaves the pane where
+        // it is and simply reloads, rather than yanking it somewhere unasked.
+        let here = pane.path
+        if (folder as NSString).deletingLastPathComponent == here {
+            await pane.go(to: here, revealing: folder)
+            revealPath = folder
+        } else {
+            await pane.reload()
+        }
+        tree.refresh(here)
+        tree.refresh(folder)
+    }
+
+    /// Answer a clash, then carry on with whatever was parked behind it.
+    private func resolveMoveClash(overwrite: Bool) {
+        guard let clash = moveClash else { return }
+        let newName = moveClashName.trimmingCharacters(in: .whitespacesAndNewlines)
+        moveClash = nil
+        let pane = actingPane, tree = actingTree
+        Task {
+            let outcome = await pane.backend.move(clash.item.path, into: clash.folder,
+                                                  newName: overwrite ? nil : newName,
+                                                  overwrite: overwrite)
+            if case .moved = outcome {
+                let landed = overwrite ? clash.item.name : newName
+                favoritesFor(pane).rename(
+                    from: clash.item.path,
+                    to: (clash.folder as NSString).appendingPathComponent(landed))
+            }
+            if case .refused(let why) = outcome { store.show(why, isError: true) }
+            if case .unreachable(let why) = outcome { store.show(why, isError: true) }
+            await moveEach(clash.remaining, into: clash.folder, pane: pane, tree: tree)
+        }
+    }
+
+    /// True while the open rename sheet belongs to the seedbox pane, where rename
+    /// means something completely different.
+    private var renamingIsSeedbox: Bool { actionPane?.mode == .seedbox }
+
+    /// Rename a seedbox item by transferring it and renaming the COPY.
+    ///
+    /// The seedbox is never touched. Renaming there did work, but the name is what
+    /// the torrent client tracks, so every use of it broke whatever was seeding
+    /// the file — a high price for a cosmetic change to a source you do not keep.
+    ///
+    /// Nothing new is invented here: it enqueues the copy, then issues an ordinary
+    /// rename against the destination path. The relay sees a queued job writing
+    /// there and records the rename against it (`defer_rename`), applying it the
+    /// moment rclone exits. That is the same mechanism as renaming something
+    /// mid-transfer, which is exactly what this is.
+    ///
+    /// The race resolves itself either way: if the copy has already finished, the
+    /// relay finds no active job and simply renames the file that is now on disk.
+    private func downloadAndRename(_ entry: Entry, to newName: String) {
+        guard dest.backend.isInsideRoot(dest.path) else {
+            store.show("Pick a destination folder first — /queue itself is the list of volumes",
+                       isError: true)
+            return
+        }
+        let destDir = dest.path
+        let landed = destDir + "/" + entry.name
+        Task {
+            let report = await store.send(src: entry.path, destDir: destDir)
+            if let report {
+                // Let the ordinary conflict flow handle it; the rename would be
+                // meaningless until the copy is settled.
+                conflict = PendingConflict(src: entry.path, destDir: destDir,
+                                           report: report, remaining: [])
+                return
+            }
+            switch await store.api.rename(path: landed, newName: newName) {
+            case .deferred:
+                store.show("Will arrive as “\(newName)”", isError: false)
+            case .renamed:
+                store.show("Renamed to “\(newName)”", isError: false)
+                await dest.reload()
+            case .refused(let why):   store.show(why, isError: true)
+            case .unauthorized:       store.show("Token rejected", isError: true)
+            case .unreachable(let why): store.show(why, isError: true)
+            }
+            tab = .queued
+        }
+    }
+
+    /// A sheet is open, so the ground must not move under it: every pending action
+    /// holds paths that a reload could invalidate mid-decision.
+    private var sheetIsOpen: Bool {
+        deleting != nil || renaming != nil || conflict != nil || bulkRenaming != nil
+            || showMoveSheet || moveClash != nil || newFolderParent != nil
+            || pendingReplace != nil
+    }
+
+    /// Reload the destination pane when a transfer just landed something in the
+    /// folder it is showing. Exact match only: a folder further up gains no row
+    /// from this, so reloading it would be churn for an identical listing.
+    private func refreshIfShowing(_ dirs: [String]) {
+        guard !sheetIsOpen, !dirs.isEmpty else { return }
+        let here = dest.path
+        guard dirs.contains(where: { $0 == here }) else { return }
+        Task { await dest.reload(); destTree.refresh(here) }
+    }
+
+    /// Returning to the app. Only the NAS side, and only if it has been a while:
+    /// that side is a local walk and costs nothing, whereas the seedbox is rclone
+    /// over FTP where a cold listing runs past a second and would make every
+    /// window switch feel slow.
+    private func refreshOnReturn() {
+        // Magnet coming to the front says nothing about Shuttle, which may well be
+        // hidden behind the browser.
+        guard ShuttlePresence.shared.visible, !sheetIsOpen, store.active.isEmpty else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastAutoRefresh) > 20 else { return }
+        lastAutoRefresh = now
+        Task { await dest.reload() }
+    }
+
+    private func beginNewFolder(_ parent: String) {
+        newFolderName = ""
+        newFolderParent = FolderTarget(path: parent)
+    }
+
+    private func beginRename(_ entry: Entry, in pane: BrowseStore, tree: TreeStore) {
+        actionPane = pane; actionTree = tree
+        renameDraft = entry.name
+        renaming = entry
+    }
+
+    /// Short label for the destination, used in the context-menu wording.
+    private var destinationLabel: String {
+        guard dest.backend.isInsideRoot(dest.path) else { return "" }
+        let root = dest.backend.root
+        return String(dest.path.dropFirst(root == "/" ? 1 : root.count + 1))
+    }
+
+    private func refreshAll() async {
+        await store.refreshStatus()
+        guard case .live = store.status else { return }
+        await store.loadTargets()
+        await seedbox.reload()
+        await dest.reload()
+        await store.poll(force: true)
+    }
+
+    private func retry() async {
+        await store.start()
+        if case .live = store.status {
+            await seedbox.restoreOrFallback()
+            await dest.restoreOrFallback()
+        }
+    }
+
+    private func centered<C: View>(@ViewBuilder _ c: () -> C) -> some View {
+        VStack(spacing: 10) { c() }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct TopBar: View {
+    @ObservedObject var store: RelayStore
+    @ObservedObject private var settings = AppSettings.shared
+    let inTitlebar: Bool
+    let gutter: Bool
+    let paneAxis: PaneSplit.Axis
+    let onTogglePane: () -> Void
+    let onToggleShuttle: () -> Void
+    let onSettings: () -> Void
+    let onRefresh: () -> Void
+
+    /// Laid out like Magnet's own bar, which this one replaces while Shuttle is on:
+    /// the qBittorrent switch where Magnet has it, and the Shuttle switch and Settings
+    /// at the right end, where Magnet has them. Switching Shuttle off is a click on
+    /// the same spot that switched it on.
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Theme.chrome
+            if inTitlebar { WindowDragArea() }
+            HStack(spacing: 10) {
+                if gutter { Color.clear.frame(width: Theme.trafficLightGutter, height: 1) }
+                if settings.qbPaneAvailable {
+                    let shown = settings.qbPaneVisible
+                    ChromeButton(symbol: paneAxis == .horizontal
+                                    ? "sidebar.left" : "rectangle.topthird.inset.filled",
+                                 help: (shown ? "Hide" : "Show") + " qBittorrent (\u{2303}\u{2318}S)",
+                                 isOn: shown,
+                                 action: onTogglePane)
+                }
+                statusPill
+                Spacer(minLength: 8)
+                ChromeButton(symbol: "arrow.clockwise", help: "Refresh (\u{2318}R)", action: onRefresh)
+                ShuttlePill(isOn: true, action: onToggleShuttle)
+                ChromeButton(symbol: "gearshape", help: "Files settings (\u{2318},)", action: onSettings)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: inTitlebar ? Theme.titlebarBandHeight : Theme.barHeight)
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
+        .frame(height: Theme.barHeight)
+    }
+
+    private var statusPill: some View {
+        HStack(spacing: 6) {
+            Circle().fill(tint.color).frame(width: 7, height: 7)
+            Text(label)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Color.primary.opacity(0.78))
+        }
+        .padding(.horizontal, 9).frame(height: 22)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(tint == .busy ? ShuttleTheme.accentSoft : ShuttleTheme.pillFill))
+        .help(helpText)
+    }
+
+    private var tint: ShuttleTint {
+        switch store.status {
+        case .probing: return .idle
+        case .live: return store.active.isEmpty ? .good : .busy
+        case .offline: return .bad
+        }
+    }
+
+    private var label: String {
+        switch store.status {
+        case .probing: return "Connecting"
+        case .live: return store.active.isEmpty ? "Idle" : "Transferring"
+        case .offline(.unauthorized): return "Token"
+        case .offline: return "Offline"
+        }
+    }
+
+    private var helpText: String {
+        switch store.status {
+        case .probing: return "Reaching the relay"
+        case .live: return "Relay reachable at \(store.baseURL)"
+        case .offline(.unauthorized): return "The relay rejected the token"
+        case .offline(.unreachable(let why)): return why
+        }
+    }
+}
+
+private struct OfflineView: View {
+    let reason: RelayStore.Reason
+    let base: String
+    /// Return presses Try Again only while Files is on screen: hidden behind the
+    /// browser, a Return meant for a page must not go here.
+    let visible: Bool
+    let onRetry: () -> Void
+    let onSettings: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: reason == .unauthorized
+                  ? "key.slash" : "antenna.radiowaves.left.and.right.slash")
+                .font(.system(size: 38, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(reason == .unauthorized ? "The relay rejected the token" : "Can't reach the relay")
+                .font(.system(size: 17, weight: .semibold))
+            Text(detail)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 420)
+            Text(base)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+            HStack(spacing: 10) {
+                Button("Try Again", action: onRetry)
+                    .keyboardShortcut(visible ? .defaultAction : nil)
+                Button("Files Settings…", action: onSettings)
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var detail: String {
+        switch reason {
+        case .unauthorized:
+            return "Paste the relay's API token in Settings. It is RELAY_API_TOKEN in "
+                 + "the NAS .env, at ~/seedbox-ftp-relay/.env."
+        case .unreachable(let why):
+            return "\(why). The relay only listens on the tailnet, so Tailscale has to be up."
+        }
+    }
+}
+
+/// Shuttle's settings, as a tab of Magnet's Settings: the relay's address and token,
+/// the seedbox it reaches, and how many copies it runs at once.
+struct ShuttleSettingsView: View {
+    @ObservedObject var store: RelayStore
+
+    @StateObject private var setup: SetupModel
+    @State private var base = ""
+    @State private var token = ""
+    @State private var concurrent = 1
+    @State private var loaded = false
+
+    init(store: RelayStore) {
+        self.store = store
+        _setup = StateObject(wrappedValue: SetupModel(store: store))
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Files drives a relay on the NAS (Shuttle's relay). Transfers between the remote "
+                     + "server and the NAS run entirely between those two machines; only "
+                     + "transfers to or from this Mac pass through it.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider().padding(.vertical, 14)
+                SetupSection(store: store, model: setup, base: $base, token: $token)
+                Divider().padding(.vertical, 16)
+                transfersGroup
+            }
+            .padding(18)
+        }
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            base = store.baseURL
+            concurrent = store.maxConcurrent
+            Task { await store.loadSeedbox() }
+        }
+        // The relay's real value can arrive after this tab opened (the checks above
+        // load it). Follow it unless the stepper has been moved, or Apply would offer
+        // to "change" the setting back to the placeholder.
+        .onChange(of: store.maxConcurrent) { old, new in
+            if concurrent == old { concurrent = new }
+        }
+    }
+
+    private var transfersGroup: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Simultaneous transfers").font(.system(size: 12, weight: .medium))
+            HStack(spacing: 10) {
+                Stepper(value: $concurrent, in: 1...max(1, store.maxConcurrentCeiling)) {
+                    Text("\(concurrent)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(minWidth: 18, alignment: .leading)
+                }
+                .fixedSize()
+                Text("of \(store.maxConcurrentCeiling) max")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                Button("Apply") {
+                    Task { await store.setMaxConcurrent(concurrent) }
+                }
+                .disabled(concurrent == store.maxConcurrent)
+                Spacer()
+            }
+            Text("How many copies the relay runs at once. Raising this does not "
+                 + "necessarily go faster — the remote link is usually the limit, and "
+                 + "parallel copies mostly divide it. Lowering it takes effect as "
+                 + "running transfers finish; nothing is interrupted.")
+                .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+
+/// Rename an item that has landed on the NAS.
+private struct RenameSheet: View {
+    let entry: Entry
+    @Binding var name: String
+    /// Non-nil on the seedbox side: the folder the copy will land in. Renaming a
+    /// seedbox item does not rename it there, and the sheet has to say so — the
+    /// menu item alone would imply the opposite.
+    var arriving: String? = nil
+    let onCancel: () -> Void
+    let onConfirm: (String) -> Void
+
+    @FocusState private var focused: Bool
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var valid: Bool {
+        !trimmed.isEmpty && trimmed != "." && trimmed != ".."
+            && !trimmed.contains("/") && trimmed != entry.name
+    }
+
+    /// The seedbox wording is not decoration. "Rename" on a source you do not own
+    /// implies the source changes, and it does not — saying where the copy lands
+    /// is the only way the sheet is honest about what the button does.
+    private var explanation: String {
+        if let arriving {
+            return "Nothing on the seedbox changes. This transfers it to \(arriving) "
+                 + "and names the copy when the download finishes."
+        }
+        return "If a transfer is still writing here, the rename is applied the moment "
+             + "it finishes — it will not interrupt the download or lose its place."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(arriving == nil ? "Rename" : "Rename on arrival")
+                .font(.system(size: 15, weight: .semibold))
+            Text(entry.path)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.head)
+                .padding(.top, 4)
+
+            TextField("", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .focused($focused)
+                .onSubmit { if valid { onConfirm(trimmed) } }
+                .padding(.top, 14)
+
+            Text(explanation)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button(arriving == nil ? "Rename" : "Download and Rename") {
+                    onConfirm(trimmed)
+                }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!valid)
+            }
+            .padding(.top, 18)
+        }
+        .padding(22)
+        .frame(width: 430)
+        .onAppear { focused = true }
+    }
+}
+
+
+/// One unanswered conflict, plus the selection still waiting behind it.
+struct PendingConflict: Identifiable {
+    let src: String
+    let destDir: String
+    let report: ConflictReport
+    let remaining: [Entry]
+    var id: String { src }
+}
+
+
+/// One confirmed replace: the armed NAS target and the seedbox item taking its
+/// place, together. Both are carried because the sheet names each of them and
+/// deletes one of them, and neither may be nil by the time it is on screen.
+/// A folder path a sheet is acting on. A bare `String?` cannot be a `.sheet(item:)`
+/// payload, and that is the whole reason the New Folder sheet was reaching back
+/// into @State instead of being handed its target.
+struct FolderTarget: Identifiable {
+    let path: String
+    var id: String { path }
+}
+
+
+struct PendingReplace: Identifiable {
+    let target: Entry
+    let source: Entry
+    var id: String { target.path + "\u{0000}" + source.path }
+}
+
+
+/// One pending delete: the whole selection, so the sheet can total it.
+struct PendingDelete: Identifiable {
+    let items: [Entry]
+    var id: String { items.map(\.path).joined(separator: "\u{0000}") }
+}
+
+
+/// One pending bulk rename: the selection in pane order, plus the snapshot of names
+/// already in that folder that the preview checks against.
+struct PendingBulkRename: Identifiable {
+    let items: [Entry]
+    let existingNames: Set<String>
+    let truncated: Bool
+    var id: String { items.map(\.path).joined(separator: "\u{0000}") }
+}
+
+
+/// Groups the menu-bar and active-pane observers into a SINGLE modifier.
+///
+/// Not tidiness: ShuttleView's body is one long modifier chain, and adding five more
+/// `.onChange`s to it directly tipped the type checker past its budget — "unable to
+/// type-check this expression in reasonable time". One modifier costs the chain one
+/// slot no matter how many observers hang off it.
+private struct MenuBridge: ViewModifier {
+    let flags: MenuFlags
+    let sourceSelection: Set<String>
+    let sourcePath: String
+    let destSelection: Set<String>
+    let destPath: String
+    @Binding var activePane: BrowseStore.Mode
+    let onFind: () -> Void
+    let onFavorites: () -> Void
+    let onAddFavorite: () -> Void
+    let landed: Landing
+    let onLanded: (Landing) -> Void
+    let onre: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            // Keeps the AppKit menu honest. Derived from what SwiftUI just recomputed,
+            // so there is no second source of truth to drift.
+            .onChange(of: flags, initial: true) { _, f in MenuState.shared.flags = f }
+            .onChange(of: sourceSelection) { _, _ in activePane = .seedbox }
+            .onChange(of: sourcePath) { _, _ in activePane = .seedbox }
+            .onChange(of: destSelection) { _, _ in activePane = .destinations }
+            .onChange(of: destPath) { _, _ in activePane = .destinations }
+            .onReceive(NotificationCenter.default.publisher(for: .shuttleFind)) { _ in
+                onFind()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .shuttleFavorites)) { _ in
+                onFavorites()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .shuttleAddFavorite)) { _ in
+                onAddFavorite()
+            }
+            .onChange(of: landed) { _, dirs in onLanded(dirs) }
+            // Test hook: opens favorites without a click, so the pane mode can be
+            // exercised from a script. Costs nothing when the variable is unset.
+            .task {
+                guard ProcessInfo.processInfo.environment["SHUTTLE_OPEN_FAVORITES"] != nil
+                else { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                onFavorites()
+            }
+            // Coming back to the window is the other moment the listing is likely
+            // stale — something may have changed it while you were elsewhere.
+            .onReceive(NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification)) { _ in onre() }
+    }
+}
+
+
+/// One item that could not move because its name is taken there, with the rest of
+/// the selection parked behind it.
+struct PendingMoveClash: Identifiable {
+    let item: Entry
+    let folder: String
+    let name: String
+    let existing: String
+    let remaining: [Entry]
+    let movedSoFar: Int
+    var id: String { item.path }
+}

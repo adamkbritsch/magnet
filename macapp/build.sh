@@ -101,7 +101,7 @@ echo "==> Compiling"
   "$SRC"/main.swift "$SRC"/Theme.swift "$SRC"/Domains.swift "$SRC"/Settings.swift "$SRC"/Secrets.swift "$SRC"/Routes.swift \
   "$SRC"/Bookmarks.swift "$SRC"/Magnet.swift "$SRC"/SearchPlugins.swift "$SRC"/Mirrors.swift "$SRC"/Categories.swift "$SRC"/Banners.swift \
   "$SRC"/Downloads.swift "$SRC"/Automatic.swift "$SRC"/AutomaticViews.swift \
-  "$SRC"/WebView.swift "$SRC"/PaneSplit.swift "$SRC"/QBittorrentPane.swift "$SRC"/RootView.swift \
+  "$SRC"/WebView.swift "$SRC"/PaneSplit.swift "$SRC"/QBittorrentPane.swift "$SRC"/shuttle/*.swift "$SRC"/RootView.swift \
   -framework AppKit -framework SwiftUI -framework WebKit \
   -framework Network -framework Security \
   -lsqlite3 \
@@ -170,6 +170,19 @@ if [[ -n "${MAGNET_HTTP_HOSTS:-}" ]]; then
   fi
 fi
 
+# Files (what was Shuttle): where the standalone app kept its settings, so they can
+# be copied in once, and where the relay's source lives, for the setup steps. Both
+# per-install, so neither is written into the repository.
+FILES_KEYS=""
+if [[ -n "${MAGNET_SHUTTLE_BUNDLE_ID:-}" ]]; then
+  FILES_KEYS+="  <key>MagnetShuttleBundleID</key><string>${MAGNET_SHUTTLE_BUNDLE_ID}</string>
+"
+fi
+if [[ -n "${MAGNET_RELAY_REPO:-}" ]]; then
+  FILES_KEYS+="  <key>MagnetRelayRepo</key><string>${MAGNET_RELAY_REPO}</string>
+"
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -188,7 +201,7 @@ ${ICON_KEYS}
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 ${ATS_KEYS}
-</dict></plist>
+${FILES_KEYS}</dict></plist>
 PLIST
 
 # Sign with a STABLE self-signed identity, creating it on first use.

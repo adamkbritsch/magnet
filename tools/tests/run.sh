@@ -42,6 +42,7 @@ run pagesafety "$(dirname "$0")/pagesafety/main.swift" "$SRC/Domains.swift" "$SR
 run blocklists "$(dirname "$0")/blocklists/main.swift"
 run automatic  "$(dirname "$0")/automatic/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift" "$SRC/Automatic.swift"
 run qbpane     "$(dirname "$0")/qbpane/main.swift"     "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/Theme.swift" "$SRC/PaneSplit.swift" "$SRC/QBittorrentPane.swift"
+run files      "$(dirname "$0")/files/main.swift"      "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/Theme.swift" "$SRC/PaneSplit.swift" "$SRC/QBittorrentPane.swift" "$SRC"/shuttle/*.swift
 echo "=============== proxy discipline ==============="
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BARE="$(grep -nE 'URLSession\.shared|URLSession\(configuration:' "$ROOT/macapp/Mirrors.swift" 2>/dev/null || true)"

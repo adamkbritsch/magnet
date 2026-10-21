@@ -8,10 +8,10 @@ import SwiftUI
 // are hidden rather than shown disabled.
 
 private enum Tint {
-    static let ok = Color(nsColor: .systemGreen)
-    static let busy = Color(nsColor: .systemBlue)
-    static let warn = Color(nsColor: .systemOrange)
-    static let bad = Color(nsColor: .systemRed)
+    static let ok = Theme.green
+    static let busy = Theme.blue
+    static let warn = Theme.orange
+    static let bad = Theme.red
     static let check = Color(nsColor: .systemPurple)
 }
 
@@ -40,7 +40,7 @@ struct AutomaticView: View {
                 AutoSetupView(hasAddress: settings.automaticBase != nil, openSettings: openSettings)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.surface)
     }
 }
 
@@ -58,24 +58,20 @@ private struct AutoPaneBar: View {
                         if let n = model.count(pane) {
                             Text("\(n)").font(.system(size: 9, weight: .semibold)).monospacedDigit()
                                 .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(Capsule().fill(Color.primary.opacity(0.1)))
+                                .background(Capsule().fill(Color.primary.opacity(0.12)))
                         }
                     }
-                    .foregroundStyle(Color.primary.opacity(model.pane == pane ? 0.9 : 0.62))
                     .padding(.horizontal, 9)
                     .frame(height: 21)
-                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(model.pane == pane ? Theme.pillFillHover : Color.clear))
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(QBTabButtonStyle(selected: model.pane == pane))
             }
             Spacer(minLength: 8)
             AutoHealthLine(model: model)
         }
         .padding(.horizontal, 12)
         .frame(height: 30)
-        .background(VisualEffectView(material: .titlebar))
+        .background(Theme.chrome)
     }
 }
 

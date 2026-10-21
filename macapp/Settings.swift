@@ -115,6 +115,10 @@ final class AppSettings: ObservableObject {
     }
     var qbPaneVisible: Bool { qbPaneShown && qbPaneAvailable }
 
+    /// Whether Files (the seedbox, NAS and Mac file browser that was Shuttle) covers
+    /// the right-hand pane. Remembered across launches, like the qBittorrent pane.
+    @Published var shuttleShown: Bool { didSet { put("shuttle.shown", shuttleShown) } }
+
     // MARK: Automatic downloads
 
     /// The NAS service behind Automatic mode (nas/automatic), e.g. http://nas:8790.
@@ -221,6 +225,7 @@ final class AppSettings: ObservableObject {
         }
         qbPaneFractionWide = share("qb.pane.fraction.wide")
         qbPaneFractionStacked = share("qb.pane.fraction.stacked")
+        shuttleShown = d.bool(forKey: "shuttle.shown")
 
         automaticServer = d.string(forKey: "automatic.server") ?? ""
         mode = d.string(forKey: "ui.mode") == "automatic" ? "automatic" : "manual"
@@ -267,6 +272,7 @@ final class AppSettings: ObservableObject {
                     "qb.plugins.signature", "qb.plugins.failed",
                     "qb.pane.shown", "qb.pane.zoom", "qb.pane.autoLogin",
                     "qb.pane.fraction.wide", "qb.pane.fraction.stacked",
+                    "shuttle.shown",
                     "automatic.server", "ui.mode", "automatic.sources.signature",
                     "nas.host", "nas.share", "nas.user", "archive.root",
                     "archive.localPath", "archive.folders", "downloads.allowedHosts",

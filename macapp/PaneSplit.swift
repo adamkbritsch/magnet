@@ -10,17 +10,18 @@ import CoreGraphics
 enum PaneSplit {
     enum Axis: Equatable { case horizontal, vertical }
 
-    /// Two halves of at least 620pt: qBittorrent's toolbar at its default 110% zoom
-    /// needs about 600, and so does Magnet's top bar once it no longer leaves room
-    /// for the window buttons.
-    static let sideBySideMinWidth: CGFloat = 1240
-    /// How far the divider can be dragged. Magnet's top bar needs about 600pt before its
-    /// controls start to collide; qBittorrent's list is still readable at 400.
+    /// Two halves of at least 740pt, the most the right-hand side ever needs: Magnet's
+    /// bar with the Files pill measures about 740, and Files lays two 330pt file panes
+    /// side by side. A full-width window on a 14-inch laptop (1512pt) still splits.
+    static let sideBySideMinWidth: CGFloat = 1480
+    /// How far the divider can be dragged. The right-hand side keeps 740pt (see
+    /// above); qBittorrent's list is still readable at 400.
     static let minPaneWidth: CGFloat = 400
-    static let minMagnetWidth: CGFloat = 600
+    static let minMagnetWidth: CGFloat = 740
     /// Stacked, neither part may shrink below a header plus something to look at.
+    /// The lower part keeps enough for Files' browser over its transfer queue.
     static let minPaneHeight: CGFloat = 240
-    static let minMagnetHeight: CGFloat = 300
+    static let minMagnetHeight: CGFloat = 380
     /// Where the divider sits until it is dragged: an even split.
     static let defaultFraction: CGFloat = 0.5
     /// The divider's grab area, wider than the line it draws.

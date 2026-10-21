@@ -162,7 +162,7 @@ final class WebController: NSObject, ObservableObject {
         // magnification, which scales the finished picture and pushes the right-hand
         // side of a table off the window.
         fresh.pageZoom = AppSettings.shared.effectiveSiteZoom
-        fresh.underPageBackgroundColor = .windowBackgroundColor
+        fresh.underPageBackgroundColor = Theme.surfaceNS
         // Trackers serve different (worse) pages to anything that looks automated.
         fresh.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"

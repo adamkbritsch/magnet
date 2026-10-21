@@ -71,7 +71,7 @@ final class QBPaneController: NSObject, ObservableObject {
         webView = QBClickThroughWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = true
-        webView.underPageBackgroundColor = .windowBackgroundColor
+        webView.underPageBackgroundColor = Theme.surfaceNS
         // qBittorrent's WebUI is designed dense; a small bump reads better on Retina.
         let saved = UserDefaults.standard.double(forKey: Self.zoomKey)
         webView.pageZoom = saved > 0 ? saved : Self.defaultZoom
@@ -680,12 +680,12 @@ struct QBPaneView: View {
             ZStack {
                 QBWebPane(controller: controller)
                 if let failure = controller.failure, !controller.isLoading {
-                    Color(nsColor: .windowBackgroundColor)
+                    Theme.surface
                     QBOfflineView(reason: failure,
                                   onRetry: { controller.reload() },
                                   onSettings: onSettings)
                 } else if controller.isAuthenticating {
-                    Color(nsColor: .windowBackgroundColor)
+                    Theme.surface
                     VStack(spacing: 12) {
                         ProgressView().controlSize(.small)
                         Text("Signing in\u{2026}")
@@ -696,12 +696,12 @@ struct QBPaneView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.surface)
     }
 
     private var bar: some View {
         ZStack(alignment: .bottom) {
-            VisualEffectView()
+            Theme.chrome
             if inTitlebar { WindowDragArea() }
 
             HStack(spacing: 10) {
@@ -723,7 +723,7 @@ struct QBPaneView: View {
                     Text(note)
                         .font(.system(size: 11))
                         .foregroundStyle(controller.noteIsWarning
-                                         ? Color(nsColor: .systemOrange) : .secondary)
+                                         ? Theme.orange : .secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         // The note gives way first when the bar is tight.
@@ -743,7 +743,7 @@ struct QBPaneView: View {
 
             if controller.isLoading {
                 GeometryReader { geo in
-                    Rectangle().fill(Color.accentColor)
+                    Rectangle().fill(Theme.accent)
                         .frame(width: geo.size.width * max(0.02, controller.progress), height: 2)
                 }
                 .frame(height: 2)
@@ -823,7 +823,7 @@ struct PaneDivider: View {
                         onHot: { hot = $0 })
             // A hairline at rest; thicker and tinted while it can be, or is being, dragged.
             Rectangle()
-                .fill(hot ? Color.accentColor.opacity(0.85) : Theme.hairline)
+                .fill(hot ? Theme.hover : Theme.hairline)
                 .frame(width: axis == .horizontal ? (hot ? 2 : 1) : nil,
                        height: axis == .vertical ? (hot ? 2 : 1) : nil)
                 .allowsHitTesting(false)

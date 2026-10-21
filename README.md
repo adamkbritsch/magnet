@@ -25,6 +25,9 @@ no browser involved. The sites in the bar are the sites it searches.
 
 Beside both sides sits **qBittorrent itself**: the client's own web interface in a pane
 of the same window, so a torrent picked on the right can be watched arriving on the left.
+And over the right-hand side, at a click, **Files**: the seedbox, the NAS and this Mac as
+file browsers with a transfer queue, for moving what has finished to where it belongs.
+The whole window takes qBittorrent's look, so the three read as one app.
 
 It ships with **nothing configured** — no sites, no home page, no services. All of it
 is set up in Settings.
@@ -86,11 +89,16 @@ magnets, downloads or what a page is allowed to start.
       │
       ├──"Open in Browser"──▶  your default browser, directly, outside the tunnel
       │
-      └──Automatic mode──▶  nas/automatic  ──▶  Sonarr ──▶ the gate ──▶ qBittorrent
-                            (your NAS)          the bar's sites ──▶ Prowlarr indexers
+      ├──Automatic mode──▶  nas/automatic  ──▶  Sonarr ──▶ the gate ──▶ qBittorrent
+      │                     (your NAS)          the bar's sites ──▶ Prowlarr indexers
+      │
+      └──Files──────────▶  the Shuttle relay   ──▶  seedbox ⇄ NAS, and either ⇄ this Mac
+                            (your NAS)
 ```
 
-- **`macapp/`** — SwiftUI, built with plain `swiftc`. No Xcode project.
+- **`macapp/`** — SwiftUI, built with plain `swiftc`. No Xcode project. `macapp/shuttle/`
+  is Files, which began as the separate Shuttle app; its relay lives in the Shuttle
+  repository, not here.
 - **`tools/`** — the filter-list converter, test suites, and fixtures.
 - **`nas/`** — a tinyproxy container for the forward proxy (`nas/fwd`), and the service
   behind Automatic mode (`nas/automatic`).
@@ -124,7 +132,8 @@ not one Apple issued, so Gatekeeper will want a right-click and Open the first t
 |---|---|
 | **Sites** | The home site, the sites in the bar, and a Firefox bookmark folder to mirror |
 | **Connection** | The forward proxy every request goes through — **required** |
-| **Torrent Client** | A qBittorrent Web API endpoint, for magnets and search plugins |
+| **Torrent Client** | A qBittorrent Web API endpoint, for magnets, search plugins and the qBittorrent pane |
+| **Files** | The relay's address and token, the seedbox it reaches, and how many copies it runs at once |
 | **Automatic** | The NAS service behind Automatic mode, its token, the seedbox sign-in it needs, and which of your sites it can search |
 | **Downloads** | An SMB share to file approved downloads into, and hosts allowed to send them |
 | **Mirrors** | Fallback domains for sites that move |
@@ -253,7 +262,7 @@ Where it goes depends on the window:
 
 | Window | qBittorrent |
 | --- | --- |
-| 1240pt wide or more (a full-width window on a laptop or larger) | The left half, side by side |
+| 1480pt wide or more (a full-width window on a laptop or larger) | The left half, side by side |
 | Narrower | The top half, above the browser, so neither side is squeezed below usable |
 | Hidden | Slides off the edge it came from, and the browser takes the whole window |
 
@@ -261,7 +270,9 @@ The line between them can be dragged; double-click it to split evenly again. Whe
 leave it is remembered across launches as qBittorrent's share of the window, so it keeps
 its proportion as the window is resized. Side by side and stacked each remember their
 own share. It stops short of squeezing either side: qBittorrent keeps at least 400pt and
-Magnet at least 600pt, enough for its top bar.
+the right-hand side at least 740pt, enough for Magnet's bar and for Files' two file panes.
+Stacked, qBittorrent keeps 240pt and the side below it 380pt, which is why the window is
+at least 640pt tall.
 
 It loads the first time it is shown, not at launch, and reads the Keychain only if the
 page has no session already. Sign-in happens inside the page, so the session cookie
@@ -272,6 +283,46 @@ rejection. After two refusals it stops trying for the launch, because qBittorren
 an address after a few failures and the address it would ban is the NAS's. The pane has
 its own cookie store, kept apart from the browser's, which carries the HTTPS-only
 CONNECT proxy when Via NAS is on. ⌘R reloads whichever side has the keyboard.
+
+### Files: the seedbox, the NAS and this Mac
+
+**Files** covers the whole right-hand side, bar included, with qBittorrent still beside
+it: the Files pill at the right end of the bar, or **Files → Show Files** (⌘3). The pill
+sits in the same place in both bars, so the click that opened Files closes it.
+
+It is what was the separate Shuttle app, brought in for what it does: two file panes, the
+seedbox on one side and the NAS or this Mac on the other, a transfer queue beneath, and
+everything Shuttle did — send, replace, move, rename, bulk rename, delete to the Trash on
+this Mac, new folders, favorites, search, uploads from this Mac, verify, the rclone log.
+It drives the same relay on the NAS, which still lives in the Shuttle repository; a copy
+between the seedbox and the NAS runs entirely between those two, and only a transfer to
+or from this Mac passes through it.
+
+- **It stays out of the way while hidden.** Its view is built the first time it is shown
+  and kept, so its panes, history and running transfers are where they were; hidden, it
+  does not poll the relay.
+- **Its keys only act on it.** Its commands keep Shuttle's keys — ⌘↩ send, ⌘↑ enclosing
+  folder, ⌘⌫ stop transfer, ⌘F find, ⇧⌘F favorites, ⌘D add a favorite — but every one
+  stands down unless Files is on screen and the keyboard is not in qBittorrent, and the
+  ones a text field uses itself (⌘↩, ⌘↑, ⌘⌫) also leave text fields alone. As a separate
+  app, ⌘⌫ typed into a text field cancelled a transfer. ⌘R and ⌘, act on whichever side
+  you are using.
+- **Its settings came with it.** The first launch copies the standalone app's relay
+  address, favorites, column layouts and divider positions (set `MAGNET_SHUTTLE_BUNDLE_ID`
+  in `local.env` to the bundle id it was built with); its settings are now a tab of
+  Settings. The relay's token and address stay in `~/Library/Application Support/Shuttle/`,
+  where other tools on this Mac read them.
+- **Quitting asks first** while a transfer to or from this Mac is running: those run inside
+  the app and stop with it. Transfers on the NAS carry on either way.
+
+### The look is qBittorrent's
+
+With qBittorrent's own interface in the window, everything else takes its look: the
+colours are the WebUI's own variables (qBittorrent 5.2.3, light and dark), applied the way
+it applies them. Bars and panels are its grey chrome, lists and pages its surface; what
+you point at turns its orange with white text, and what is chosen — a tab, the pane that
+is showing, the qBittorrent switch — is its blue. Manual and Automatic are a tab strip
+like its Transfers / Search / RSS.
 
 ### Adding a site adds its search plugin
 
@@ -642,12 +693,14 @@ working. Sonarr catches up when it resumes; the site list waits for Prowlarr the
 
 ## Testing
 
-`tools/tests/run.sh` runs fifteen offline Swift suites — bookmarks, settings, wikipedia,
+`tools/tests/run.sh` runs sixteen offline Swift suites — bookmarks, settings, wikipedia,
 fmhy, categories, banners, downloads, plugins, choicelog, qbsession, redirects,
 pagesafety, blocklists, automatic, qbpane (where the qBittorrent pane sits at every
 window size, how far the divider can be dragged and that its place is saved, and its
 sign-in script run in a real web view against a local stand-in
-for qBittorrent 5.1, 5.2, a ban, a redirect and a 204 that set no session) — then the Automatic service's Python tests (the gate,
+for qBittorrent 5.1, 5.2, a ban, a redirect and a 204 that set no session), files (the
+one-time copy of Shuttle's settings, and qBittorrent's palette checked against its CSS) —
+then the Automatic service's Python tests (the gate,
 the file rules, qBittorrent and Sonarr conversations, and the sites-to-sources sync,
 and the scout, against in-process fakes), a check that every site probe goes through the proxy, and a
 hygiene check. Hygiene scans what is staged, the working copies and new files —

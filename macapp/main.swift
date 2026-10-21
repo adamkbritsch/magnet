@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.minSize = Theme.minWindow
+        // Kept, so the Dock icon can bring it back (applicationShouldHandleReopen).
+        window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         // An empty unified toolbar exists purely for its geometry, and it is the only
         // way to match the sibling apps' window corners.
@@ -67,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // hosting view publishes the content's ideal size as the window's limits.
         host.sizingOptions = []
         window.contentView = host
+        window.delegate = self
         window.setFrameAutosaveName(Self.frameAutosaveName)
         if UserDefaults.standard.string(forKey: "NSWindow Frame \(Self.frameAutosaveName)") == nil {
             window.center()
@@ -77,6 +80,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Transfers to and from this Mac run inside this process and die with it, unlike
+    /// the relay's, which carry on on the NAS. Shuttle was rarely quit; Magnet is quit
+    /// far more often, so it asks first rather than dropping a half-copied file.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        quitConfirmed || confirmQuitWithTransfers() ? .terminateNow : .terminateCancel
+    }
+
+    /// The Dock icon brings the window back if it was ever closed without quitting.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { window?.makeKeyAndOrderFront(nil) }
+        return true
+    }
+
+    /// Set once the question has been answered "Quit Anyway" on the way out, so
+    /// closing the window does not ask it twice.
+    private var quitConfirmed = false
+
+    /// True when it is fine to stop: nothing is transferring to or from this Mac, or
+    /// the user said to stop anyway.
+    private func confirmQuitWithTransfers() -> Bool {
+        let running = MainActor.assumeIsolated { ShuttleStores.current?.local.active.count ?? 0 }
+        guard running > 0 else { return true }
+        let alert = NSAlert()
+        alert.messageText = running == 1
+            ? "A transfer to or from this Mac is still running"
+            : "\(running) transfers to or from this Mac are still running"
+        alert.informativeText = "They stop if Magnet quits, and the files they were copying "
+            + "are left incomplete. Transfers on the NAS are not affected."
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: "Quit Anyway")
+        let stop = alert.runModal() == .alertSecondButtonReturn
+        if stop { quitConfirmed = true }
+        return stop
+    }
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     private func buildMenu() {
@@ -135,6 +173,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewItem.submenu = viewMenu
         mainMenu.addItem(viewItem)
 
+        // Files: what was Shuttle. Its commands keep Shuttle's keys, but every one of
+        // them stands down unless Files is on screen and the keyboard is not in
+        // qBittorrent (see validateMenuItem) -- as menu key equivalents they reach the
+        // menu before the focused view, so ungated, ⌘⌫ typed into a web page's text
+        // field would cancel a transfer.
+        let filesItem = NSMenuItem()
+        let filesMenu = NSMenu(title: "Files")
+        filesMenu.addItem(withTitle: "Show Files", action: #selector(toggleFiles), keyEquivalent: "3").target = self
+        filesMenu.addItem(.separator())
+        let send = filesMenu.addItem(withTitle: "Send Selection", action: #selector(filesSend), keyEquivalent: "\r")
+        send.keyEquivalentModifierMask = [.command]
+        send.target = self
+        let up = filesMenu.addItem(withTitle: "Enclosing Folder", action: #selector(filesUp),
+                                   keyEquivalent: String(format: "%C", 0xF700))
+        up.keyEquivalentModifierMask = [.command]
+        up.target = self
+        let stop = filesMenu.addItem(withTitle: "Stop Transfer", action: #selector(filesStop),
+                                     keyEquivalent: String(UnicodeScalar(UInt8(NSDeleteCharacter))))
+        stop.keyEquivalentModifierMask = [.command]
+        stop.target = self
+        filesMenu.addItem(.separator())
+        filesMenu.addItem(withTitle: "Find\u{2026}", action: #selector(filesFind), keyEquivalent: "f").target = self
+        filesMenu.addItem(withTitle: "Favorites", action: #selector(filesFavorites), keyEquivalent: "F").target = self
+        filesMenu.addItem(withTitle: "Add This Folder to Favorites", action: #selector(filesAddFavorite),
+                          keyEquivalent: "d").target = self
+        filesMenu.addItem(.separator())
+        filesMenu.addItem(withTitle: "Source Directory Tree", action: #selector(filesSourceTree),
+                          keyEquivalent: "").target = self
+        filesMenu.addItem(withTitle: "Destination Directory Tree", action: #selector(filesDestTree),
+                          keyEquivalent: "").target = self
+        filesMenu.addItem(withTitle: "Transfer Queue", action: #selector(filesQueue), keyEquivalent: "").target = self
+        filesMenu.addItem(withTitle: "Reset Layout", action: #selector(filesResetLayout), keyEquivalent: "").target = self
+        filesItem.submenu = filesMenu
+        mainMenu.addItem(filesItem)
+
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
@@ -153,6 +226,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showManual() { NotificationCenter.default.post(name: .qbModeManual, object: nil) }
     @objc private func showAutomatic() { NotificationCenter.default.post(name: .qbModeAutomatic, object: nil) }
     @objc private func toggleQBittorrent() { NotificationCenter.default.post(name: .qbTogglePane, object: nil) }
+
+    @objc private func toggleFiles() { post(.shuttleToggle) }
+    @objc private func filesSend() { post(.shuttleSend) }
+    @objc private func filesUp() { post(.shuttleUp) }
+    @objc private func filesStop() { post(.shuttleCancel) }
+    @objc private func filesFind() { post(.shuttleFind) }
+    @objc private func filesFavorites() { post(.shuttleFavorites) }
+    @objc private func filesAddFavorite() { post(.shuttleAddFavorite) }
+    @objc private func filesSourceTree() { post(.shuttleToggleSourceTree) }
+    @objc private func filesDestTree() { post(.shuttleToggleDestTree) }
+    @objc private func filesQueue() { post(.shuttleToggleQueue) }
+    @objc private func filesResetLayout() { post(.shuttleResetLayout) }
+    private func post(_ name: Notification.Name) { NotificationCenter.default.post(name: name, object: nil) }
 }
 
 extension AppDelegate: NSMenuItemValidation {
@@ -163,6 +249,34 @@ extension AppDelegate: NSMenuItemValidation {
             // Nothing to show until qBittorrent's address is set.
             return settings.qbPaneAvailable
         }
-        return true
+        let flags = MenuState.shared.flags
+        switch item.action {
+        case #selector(toggleFiles):
+            item.title = AppSettings.shared.shuttleShown ? "Hide Files" : "Show Files"
+            // Never under a sheet: see RootView.sheetAttached.
+            return (NSApp.mainWindow ?? NSApp.keyWindow)?.attachedSheet == nil
+        case #selector(showManual), #selector(showAutomatic), #selector(goHome):
+            return (NSApp.mainWindow ?? NSApp.keyWindow)?.attachedSheet == nil
+        // Keys a text field uses itself stand aside for one, even inside Files.
+        case #selector(filesSend): return shuttleKeysAllowed(editingKey: true) && flags.canSend
+        case #selector(filesUp): return shuttleKeysAllowed(editingKey: true) && flags.canGoUp
+        case #selector(filesStop): return shuttleKeysAllowed(editingKey: true) && flags.hasSelectedTransfer
+        case #selector(filesFind), #selector(filesFavorites), #selector(filesAddFavorite):
+            return shuttleKeysAllowed(editingKey: false) && flags.isLive
+        case #selector(filesSourceTree), #selector(filesDestTree), #selector(filesQueue),
+             #selector(filesResetLayout):
+            return AppSettings.shared.shuttleShown
+        default:
+            return true
+        }
+    }
+}
+
+/// Closing the window quits the app, so it asks the quit question BEFORE the window
+/// goes: answered "Keep Running" afterwards, the app would be left running with
+/// nothing on screen.
+extension AppDelegate: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        quitConfirmed || confirmQuitWithTransfers()
     }
 }
