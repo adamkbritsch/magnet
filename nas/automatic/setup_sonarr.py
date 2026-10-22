@@ -70,10 +70,11 @@ GATE_HOST, GATE_PORT = "172.17.0.1", 8791
 FORMATS_DIR = os.path.join(HERE, "formats")
 TRASH_RAW = "https://raw.githubusercontent.com/TRaSH-Guides/Guides/master/docs/json/sonarr/cf/"
 
-# What makes a release good, as scores. Each tier outweighs everything below it put
-# together, so the order is strict: Dolby Vision (10000) > 2160p (3000) > HDR (1000) >
-# release group (<=900) > audio (<=300) > the small stuff. A ban sits so far below
-# zero that no amount of the above can lift a release back over the minimum.
+# What makes a release good, as scores: Dolby Vision (10000) > 2160p (3000) > HDR
+# (1000) > release group (<=900) > audio (<=300) > the small stuff. Dolby Vision and
+# 2160p each outweigh everything below them put together; HDR does not quite (a top
+# release group with the best audio reaches 1200). A ban sits so far below zero that no
+# amount of the above can lift a release back over the minimum.
 BAN = -100000
 EXEC_NAME = "Banned: executable"
 SCORES = {

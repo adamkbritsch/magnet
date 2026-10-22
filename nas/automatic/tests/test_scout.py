@@ -166,6 +166,26 @@ class ScoutTests(Harness):
             self.scout.run_once()
         self.assertIn(h, self.qb.torrents)
 
+    def test_checking_or_moving_is_never_a_stall(self):
+        self.login()
+        t = make_torrent("Show.S01E08", [("Show.S01E08.mkv", 3 * GB)])
+        self.add([t])
+        h = info_hash(t)
+        for state in ("moving", "checkingResumeData", "allocating", "checkingDL"):
+            self.qb.torrents[h].update(progress=0.6, state=state)
+            self.gate.poll()
+            self.scout.run_once()
+            self.tick(4 * HOUR)
+            self.scout.run_once()
+            self.assertIn(h, self.qb.torrents, f"{state} for four hours is not a stall")
+        # Back to downloading: the clock starts from here, not from before the move.
+        self.qb.torrents[h].update(state="stalledDL")
+        self.gate.poll()
+        self.scout.run_once()
+        self.tick(2 * HOUR)
+        self.scout.run_once()
+        self.assertIn(h, self.qb.torrents)
+
     def test_a_magnet_whose_file_list_never_comes(self):
         self.login()
         self.add(urls=["magnet:?xt=urn:btih:" + "d" * 40 + "&dn=Show.S01E08"])

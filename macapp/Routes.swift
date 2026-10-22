@@ -117,13 +117,6 @@ final class RouteStore: ObservableObject {
         session = URLSession(configuration: cfg)
     }
 
-    func setProxy(host: String, port: UInt16) {
-        proxyHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        proxyPort = port
-        defaults.set(proxyHost, forKey: "proxy.host")
-        defaults.set(Int(port), forKey: "proxy.port")
-    }
-
     /// Guards the one-shot resume. The state handler and the timeout fire on
     /// different queues, so resuming a continuation twice is a real crash, not a
     /// theoretical one.
@@ -165,6 +158,11 @@ final class RouteStore: ObservableObject {
     }
 
     func resolve() async {
+        // Read now rather than at launch: Settings → Connection edits these, and the
+        // check has to probe the address the web view is about to use (ProxyRoute
+        // reads the same settings).
+        proxyHost = Config.proxyHost
+        proxyPort = Config.proxyPort
         status = .probing
         guard !proxyHost.trimmingCharacters(in: .whitespaces).isEmpty else {
             status = .offline("No forward proxy is configured. Open Settings \u{2192} "

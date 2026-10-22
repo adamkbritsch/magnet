@@ -279,6 +279,12 @@ class Scout:
             p = round(float(t.get("progress") or 0), 4)
             if qbstate.is_finished(t) or verdict not in ("approved", "held"):
                 continue
+            # Checking, moving, allocating: qBittorrent's own work, which can hold one
+            # progress figure for a long time on a big file. Never a stall, and the
+            # clock starts again when it is done.
+            if qbstate.is_checking(t):
+                live[h] = {"p": p, "since": now}
+                continue
             last = seen.get(h)
             if not last or last["p"] != p:
                 live[h] = {"p": p, "since": now}

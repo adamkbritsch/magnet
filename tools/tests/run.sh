@@ -25,7 +25,7 @@ run banners    "$(dirname "$0")/banners/main.swift"    "$SRC/Domains.swift" "$SR
 run downloads  "$(dirname "$0")/downloads/main.swift"  "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift" "$SRC/Categories.swift" "$SRC/Bookmarks.swift" "$SRC/Magnet.swift" "$SRC/Downloads.swift"
 run plugins    "$(dirname "$0")/plugins/main.swift"    "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 if [ "${1:-}" = "--live" ]; then
-  run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Mirrors.swift"
+  run live "$(dirname "$0")/live/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Routes.swift" "$SRC/Mirrors.swift"
   run plugins-live "$(dirname "$0")/pluginslive/main.swift" "$SRC/Domains.swift" "$SRC/Settings.swift" "$SRC/Secrets.swift" "$SRC/Magnet.swift" "$SRC/SearchPlugins.swift"
 fi
 

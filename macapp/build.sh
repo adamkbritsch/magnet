@@ -30,11 +30,6 @@ VERSION="1.0.0"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-if [[ ! -f "$SRC/blocklist-0.json" ]]; then
-  echo "==> No filter lists found; building them"
-  python3 "$ROOT/tools/build-blocklist.py"
-fi
-
 # Build against Xcode's SDK, not the Command Line Tools' one. Shared verbatim with
 # the sibling apps (Shuttle and qBittorrent).
 #
@@ -136,7 +131,7 @@ if [[ -z "$ICON_KEYS" && -f "$SRC/app.icns" ]]; then
   cp "$SRC/app.icns" "$APP/Contents/Resources/app.icns"
   ICON_KEYS="  <key>CFBundleIconFile</key><string>app.icns</string>"
 fi
-compgen -G "$SRC/blocklist-*.json" >/dev/null && cp "$SRC"/blocklist-*.json "$APP/Contents/Resources/" || true
+compgen -G "$SRC/blocklist-*.json" >/dev/null && cp -p "$SRC"/blocklist-*.json "$APP/Contents/Resources/" || true
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # A host reached over plain HTTP needs an App Transport Security exception or the
@@ -223,6 +218,8 @@ PLIST
 # expected and harmless. Same approach the Shuttle build uses.
 SIGN_ID="${MAGNET_SIGN_IDENTITY:-1337x Local Signing}"
 
+# The Keychain only imports a PKCS#12 written with the old algorithms. OpenSSL 3 needs
+# -legacy for that; macOS's own LibreSSL rejects the flag but writes them by default.
 if ! security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
   echo "==> Creating a stable signing identity: $SIGN_ID"
   CERTDIR="$(mktemp -d)"
@@ -232,9 +229,12 @@ if ! security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
         -addext "basicConstraints=critical,CA:false" \
         -addext "keyUsage=critical,digitalSignature" \
         -addext "extendedKeyUsage=critical,codeSigning" >/dev/null 2>&1 \
-     && openssl pkcs12 -export -legacy -out "$CERTDIR/id.p12" \
-        -inkey "$CERTDIR/key.pem" -in "$CERTDIR/cert.pem" \
-        -passout pass:x1337 -name "$SIGN_ID" >/dev/null 2>&1 \
+     && { openssl pkcs12 -export -legacy -out "$CERTDIR/id.p12" \
+            -inkey "$CERTDIR/key.pem" -in "$CERTDIR/cert.pem" \
+            -passout pass:x1337 -name "$SIGN_ID" >/dev/null 2>&1 \
+          || openssl pkcs12 -export -out "$CERTDIR/id.p12" \
+            -inkey "$CERTDIR/key.pem" -in "$CERTDIR/cert.pem" \
+            -passout pass:x1337 -name "$SIGN_ID" >/dev/null 2>&1; } \
      && security import "$CERTDIR/id.p12" -k "$HOME/Library/Keychains/login.keychain-db" \
         -P x1337 -A >/dev/null 2>&1; then
     echo "    created"

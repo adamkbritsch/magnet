@@ -172,6 +172,10 @@ struct RootView: View {
                                     automatic: automatic, sources: sources, syncSources: syncSources))
         .modifier(FilesTriggers(settings: settings, store: shuttle.store, automatic: automatic,
                                 mounted: $shuttleMounted))
+        .modifier(ProxyTriggers(settings: settings, apply: {
+            await routes.resolve()
+            applyRoute()
+        }))
     }
 
     private func togglePane() {
@@ -416,6 +420,31 @@ private struct AutomaticTriggers: ViewModifier {
                 settings.shuttleShown = false
                 settings.mode = "automatic"
             }
+    }
+}
+
+/// A proxy address changed in Settings → Connection takes effect once it has settled:
+/// the route is checked again and the browser rebuilt on it, so "changes apply as you
+/// make them" holds for the one setting every page depends on.
+private struct ProxyTriggers: ViewModifier {
+    @ObservedObject var settings: AppSettings
+    let apply: () async -> Void
+    @State private var settle: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: settings.proxyHost) { _, _ in schedule() }
+            .onChange(of: settings.proxyPort) { _, _ in schedule() }
+    }
+
+    private func schedule() {
+        settle?.cancel()
+        let host = settings.proxyHost, port = settings.proxyPort
+        settle = Task {
+            try? await Task.sleep(for: .milliseconds(800))
+            guard !Task.isCancelled, settings.proxyHost == host, settings.proxyPort == port else { return }
+            await apply()
+        }
     }
 }
 
@@ -1769,15 +1798,21 @@ private struct DownloadsTab: View {
 
     /// Stored as registrable domains, so a host added as a full URL or with a `www.`
     /// still matches what a download actually arrives from.
+    /// Exact hosts, as the download check compares them (Downloads.isTrustedFileHost):
+    /// a file host is approved host by host, never by its whole domain. Reducing the
+    /// entry to its domain here meant a CDN host such as dl3.example.com, typed in as the
+    /// refusal named it, was saved as example.com and never matched.
     private func commitHosts() {
         let hosts = hostsText.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
             .map { entry -> String in
-                guard let url = URL(string: entry), let host = url.host else { return entry }
+                guard let url = URL(string: entry), let host = url.host else {
+                    // A bare host with a path or port typed after it.
+                    return String(entry.split(separator: "/").first ?? "")
+                        .split(separator: ":").first.map(String.init) ?? entry
+                }
                 return host
             }
-            .map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 }
-            .map { registrableDomain($0) }
             .filter { !$0.isEmpty && $0.contains(".") }
         if hosts != settings.allowedDownloadHosts { settings.allowedDownloadHosts = hosts }
     }
