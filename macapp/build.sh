@@ -96,7 +96,7 @@ echo "==> Compiling"
   "$SRC"/main.swift "$SRC"/Theme.swift "$SRC"/Domains.swift "$SRC"/Settings.swift "$SRC"/Secrets.swift "$SRC"/Routes.swift \
   "$SRC"/Bookmarks.swift "$SRC"/Magnet.swift "$SRC"/SearchPlugins.swift "$SRC"/Mirrors.swift "$SRC"/Categories.swift "$SRC"/Banners.swift \
   "$SRC"/Downloads.swift "$SRC"/Automatic.swift "$SRC"/AutomaticViews.swift \
-  "$SRC"/WebView.swift "$SRC"/PaneSplit.swift "$SRC"/QBittorrentPane.swift "$SRC"/shuttle/*.swift "$SRC"/RootView.swift \
+  "$SRC"/NavigationLog.swift "$SRC"/WebView.swift "$SRC"/PaneSplit.swift "$SRC"/QBittorrentPane.swift "$SRC"/shuttle/*.swift "$SRC"/RootView.swift \
   -framework AppKit -framework SwiftUI -framework WebKit \
   -framework Network -framework Security \
   -lsqlite3 \

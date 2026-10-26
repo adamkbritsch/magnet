@@ -53,31 +53,48 @@ enum RedirectGuard {
                        known: Set<String>,
                        approved: Set<String>,
                        denied: Set<String>) -> Decision {
+        explain(from: current, to: destination, navigationType: navigationType, chain: chain,
+                known: known, approved: approved, denied: denied).decision
+    }
+
+    /// The decision, and which rule made it -- for the navigation log, since a block
+    /// is silent on screen.
+    static func explain(from current: URL?,
+                        to destination: URL,
+                        navigationType: NavigationKind,
+                        chain: Chain,
+                        known: Set<String>,
+                        approved: Set<String>,
+                        denied: Set<String>) -> (decision: Decision, reason: String) {
         guard let scheme = destination.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
-              let destHost = destination.host else { return .allow }
+              let destHost = destination.host else { return (.allow, "not a web address") }
         let dest = registrableDomain(destHost)
 
         // Somewhere already refused, before anything else. Approving one destination
         // makes the chain app-initiated, and an app-initiated chain used to short-
         // circuit to allow above this line -- so a host you approved could 302 the
         // window onward to one you had explicitly refused.
-        if denied.contains(dest) { return .block }
+        if denied.contains(dest) { return (.block, "\(dest) was refused this session") }
         // The app asked for it, and so did every redirect it triggers.
-        if chain.appInitiated { return .allow }
+        if chain.appInitiated { return (.allow, "the app asked for it") }
         // Where the chain was aimed, including that site's own redirects.
-        if let anchor = chain.anchorDomain, anchor == dest { return .allow }
+        if let anchor = chain.anchorDomain, anchor == dest { return (.allow, "where the click was aimed") }
         // Still on the site being read.
-        if let current, let host = current.host, registrableDomain(host) == dest { return .allow }
+        if let current, let host = current.host, registrableDomain(host) == dest {
+            return (.allow, "same site as the page")
+        }
         // A site in the bar, or one of its mirrors: somewhere you already go.
-        if known.contains(dest) { return .allow }
+        if known.contains(dest) { return (.allow, "a site in the bar or its mirror") }
         // Somewhere a person already said yes to, in the dialog.
-        if approved.contains(dest) { return .allow }
+        if approved.contains(dest) { return (.allow, "approved this session") }
 
         // Leaving for somewhere unknown. A link activation earns the question -- even
         // a scripted one, since the dialog is where the person answers -- and a page
         // moving itself outright earns nothing.
-        return navigationType == .userLink ? .confirm : .block
+        return navigationType == .userLink
+            ? (.confirm, "\(dest) is unknown; ask")
+            : (.block, "\(dest) is unknown and no click led there")
     }
 
     /// Whether a real pointer was recently on a link to this destination.

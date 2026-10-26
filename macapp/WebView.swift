@@ -218,6 +218,7 @@ final class WebController: NSObject, ObservableObject {
     func stop() { webView.stopLoading() }
 
     func showToast(_ text: String, isError: Bool) {
+        NavigationLog.write("notice", (isError ? "error: " : "") + text)
         toast = text
         toastIsError = isError
         toastClear?.cancel()
@@ -305,6 +306,20 @@ extension WebController: WKScriptMessageHandler {
     }
 }
 
+extension WebController {
+    static func typeName(_ type: WKNavigationType) -> String {
+        switch type {
+        case .linkActivated: return "link"
+        case .formSubmitted: return "form"
+        case .formResubmitted: return "form-again"
+        case .backForward: return "back/forward"
+        case .reload: return "reload"
+        case .other: return "other"
+        @unknown default: return "unknown"
+        }
+    }
+}
+
 extension WebController: WKNavigationDelegate {
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
@@ -341,6 +356,7 @@ extension WebController: WKNavigationDelegate {
             // script navigation it is, which is blocked silently rather than
             // dignified with a dialog. This is what stops a hijack from turning
             // every click into either a redirect or a question.
+            let declared = kind
             if kind == .userLink,
                !RedirectGuard.clickMatches(destination: url, clicks: trustedClicks,
                                            now: Date()) {
@@ -349,10 +365,20 @@ extension WebController: WKNavigationDelegate {
 
             // Back and forward are always the user, and a browser that will not go back
             // is worse than any advert.
+            if kind == .history {
+                NavigationLog.write("navigate", "\(Self.typeName(navigationAction.navigationType)) "
+                    + "\(NavigationLog.describe(webView.url)) -> \(NavigationLog.describe(url)) "
+                    + "[\(navigationAction.request.httpMethod ?? "GET")]: allow (back, forward or reload)")
+            }
             if kind != .history {
-                switch RedirectGuard.decide(from: webView.url, to: url, navigationType: kind,
-                                            chain: chain, known: knownDomains(for: url),
-                                            approved: approvedDomains, denied: deniedDomains) {
+                let verdict = RedirectGuard.explain(from: webView.url, to: url, navigationType: kind,
+                                                    chain: chain, known: knownDomains(for: url),
+                                                    approved: approvedDomains, denied: deniedDomains)
+                NavigationLog.write("navigate", "\(Self.typeName(navigationAction.navigationType))"
+                    + (declared == .userLink && kind == .script ? " (no real click on a link there)" : "")
+                    + " \(NavigationLog.describe(webView.url)) -> \(NavigationLog.describe(url)) "
+                    + "[\(navigationAction.request.httpMethod ?? "GET")]: \(verdict.decision) -- \(verdict.reason)")
+                switch verdict.decision {
                 case .allow:
                     // Spent here, not at didCommit. The page currently on screen keeps
                     // running for the whole provisional phase, so a flag that outlived
@@ -407,6 +433,9 @@ extension WebController: WKNavigationDelegate {
         // seedbox fetch for a stranger.
         let isMagnet = url.scheme?.lowercased() == "magnet"
         if isMagnet || url.pathExtension.lowercased() == "torrent" {
+            NavigationLog.write("torrent", "\(isMagnet ? "magnet" : NavigationLog.describe(url)) "
+                + "main frame: \(isMainFrame), real click: "
+                + "\(RedirectGuard.clickMatches(destination: url, clicks: trustedClicks, now: Date()))")
             decisionHandler(.cancel)
             // An advert in a frame does not get to add torrents to your client.
             guard isMainFrame else { return }
@@ -431,9 +460,15 @@ extension WebController: WKNavigationDelegate {
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         // Anna's Archive serves its files as ordinary navigations, so without this
         // they either render as junk or silently do nothing.
-        switch DownloadManager.shared.disposition(navigationResponse,
-                                                  pageURL: webView.url,
-                                                  userInitiated: navigationWasClicked) {
+        let disposition = DownloadManager.shared.disposition(navigationResponse,
+                                                             pageURL: webView.url,
+                                                             userInitiated: navigationWasClicked)
+        if navigationResponse.isForMainFrame {
+            let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode ?? 0
+            NavigationLog.write("response", "\(NavigationLog.describe(navigationResponse.response.url)) "
+                + "\(status) \(navigationResponse.response.mimeType ?? "?"): \(disposition)")
+        }
+        switch disposition {
         case .capture:
             // Asked here rather than after the download object exists, so a refusal
             // never opens a connection at all.
@@ -514,6 +549,7 @@ extension WebController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        NavigationLog.write("commit", NavigationLog.describe(webView.url))
         // Spent. It covered this navigation and its redirects; it does not extend to
         // whatever the page does once it is on screen.
         chain.appInitiated = false
@@ -521,6 +557,7 @@ extension WebController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        NavigationLog.write("finish", NavigationLog.describe(webView.url))
         navigationInFlight = false
         // The challenge page reloads itself when solved, so this fires again with
         // the real page and clears the flag.
@@ -533,6 +570,7 @@ extension WebController: WKNavigationDelegate {
             self.isChallenged = challenged
             self.challengeTimeout?.cancel()
             if challenged {
+                NavigationLog.write("challenge", "\(NavigationLog.describe(webView.url)) covered while the check runs")
                 // Never hold the cover indefinitely — if the challenge stalls, show
                 // the page so the user can interact with it (some need a click).
                 let work = DispatchWorkItem { [weak self] in self?.isChallenged = false }
@@ -556,6 +594,10 @@ extension WebController: WKNavigationDelegate {
 
     private func report(_ error: Error) {
         let ns = error as NSError
+        let failingURL = (ns.userInfo[NSURLErrorFailingURLErrorKey] as? URL)
+            ?? (ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String).flatMap { URL(string: $0) }
+        NavigationLog.write("fail", "\(NavigationLog.describe(failingURL)) \(ns.domain) \(ns.code): "
+            + ns.localizedDescription)
         if ns.code == NSURLErrorCancelled { return }
         if ns.domain == "WebKitErrorDomain" && (ns.code == 101 || ns.code == 102) { return }
 
@@ -630,8 +672,12 @@ extension WebController: WKUIDelegate {
         // Followed in this view only when it is plainly a file. Anything else a popup
         // asks for is dropped: on these sites `window.open` is the advert, and loading
         // it here put it on screen without the redirect guard ever seeing it.
-        if let url = navigationAction.request.url,
-           DownloadManager.shared.mayBeDownload(url, pageURL: webView.url) {
+        let followed = navigationAction.request.url.map {
+            DownloadManager.shared.mayBeDownload($0, pageURL: webView.url)
+        } ?? false
+        NavigationLog.write("popup", "\(NavigationLog.describe(navigationAction.request.url)) from "
+            + "\(NavigationLog.describe(webView.url)): " + (followed ? "a file, loaded here" : "dropped"))
+        if followed, let url = navigationAction.request.url {
             webView.load(URLRequest(url: url))
         }
         return nil
