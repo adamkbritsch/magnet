@@ -345,21 +345,17 @@ struct FileTable: View {
                     Task { await browse.open(e) }
                 }
             }
-            // Rename and Delete now work on BOTH sides. The seedbox mount is
-            // read-only, so the relay performs those over rclone against the remote
-            // instead of through the filesystem; the depth rule is the same one that
-            // governs what may be copied, so a whole level of the library is still
-            // refused. New Folder stays destination-only — the relay has no seedbox
-            // mkdir and offering it would be a guaranteed error.
-            //
-            // Gated separately below, because they need different things: one item
-            // gets the plain rename sheet while several get the bulk one (which
-            // derives a distinct name per item), and deleting is happy with any
-            // number.
+            // Delete works on both sides; the relay deletes on the seedbox over rclone.
+            // Rename does not: the relay refuses it there, because the name is what
+            // the client seeding those files tracks. One seedbox item still gets a
+            // Rename, which copies it to the other pane and renames the copy (see
+            // downloadAndRename); several get no bulk rename on the seedbox, since
+            // every one of them would be refused. New Folder stays destination-only
+            // too -- the relay has no seedbox mkdir.
             if rowsAreActionable {
                 if items.count == 1, let e = items.first {
                     Button("Rename…") { onRename(e) }
-                } else if items.count > 1 {
+                } else if items.count > 1, browse.mode == .destinations {
                     Button("Rename \(items.count) Items…") { onBulkRename(ordered) }
                 }
                 if browse.mode == .destinations {
