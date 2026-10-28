@@ -175,6 +175,7 @@ class FakeSonarr(_Server):
         self.files = {}       # episode file id -> /episodefile/{id}
         self.releases = {}    # episode id -> what an interactive search (/release) finds
         self.taken = []       # bodies POSTed to /release
+        self.looked = []      # episode ids searched through /release
         self.profiles = [{"name": "Magnet", "minUpgradeFormatScore": 100}]
         self.alive = True
         super().__init__(_SonarrHandler)
@@ -215,6 +216,7 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
             return self._json([dict(s.episodes.get(i, {}), id=i, hasFile=i in s.has_file, monitored=i not in s.unmonitored)
                                for i in ids])
         if path == "/api/v3/release":
+            s.looked.append(int(params.get("episodeId", 0)))
             return self._json(s.releases.get(int(params.get("episodeId", 0)), []))
         if path == "/api/v3/qualityprofile":
             return self._json(s.profiles)

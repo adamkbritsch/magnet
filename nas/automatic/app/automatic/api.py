@@ -503,9 +503,14 @@ class API:
                 cover[h] = (max((r.get("customFormatScore") or 0) for r in grabs[h]),
                             {r["episodeId"] for r in grabs[h] if r.get("episodeId")})
 
+        settled = {h for h in cover if latest.get(h) and latest[h]["status"] in ("running", "done", "skipped")}
+
         def beaten(h):
+            """Every episode in it has a better finished copy, or one as good that is in
+            the library or on its way there (between two untouched equals, one goes)."""
             score, eps = cover[h]
-            return bool(eps) and all(any(o != h and o not in given_up and s > score and e in oe
+            return bool(eps) and all(any(o != h and o not in given_up and e in oe
+                                         and (s > score or (s == score and (o in settled or o < h)))
                                          for o, (s, oe) in cover.items()) for e in eps)
         out = {}
         for h in finished:
@@ -515,7 +520,9 @@ class API:
                 out[h] = (tr["status"], message)
             elif tr and tr["status"] == "failed" and (h in given_up or not self.auto_copy):
                 out[h] = ("failed", message)
-            elif self.auto_copy and h in cover and not beaten(h):
+            elif self.auto_copy and h in cover and beaten(h):
+                out[h] = ("skipped", "A copy at least as good is in the library or on its way there")
+            elif self.auto_copy and h in cover:
                 out[h] = ("waiting", message)
             else:
                 out[h] = (None, message)
@@ -539,12 +546,20 @@ class API:
             if tr["status"] == "failed":
                 failures[tr["hash"]] = failures.get(tr["hash"], 0) + 1
         now = time.time()
+        # One import per episode at a time: Sonarr deletes the old file before copying
+        # the new one, so two at once leave the episode without a file twice over.
+        importing = {r.get("episodeId") for h, (status, _) in states.items() if status == "running"
+                     for r in grabs.get(h, [])}
         waiting = [h for h, (status, _) in states.items() if status == "waiting"]
         for h in sorted(waiting, key=lambda h: -max((r.get("customFormatScore") or 0) for r in grabs[h])):
+            eps = {r.get("episodeId") for r in grabs[h]}
+            if eps & importing:
+                continue
             tries = failures.get(h, 0)
             if tries and now - latest[h]["updated"] < self.AUTO_RETRY_DELAYS[min(tries, len(self.AUTO_RETRY_DELAYS)) - 1]:
                 continue
             t = self.gate.known.get(h) or {}
+            importing |= eps
             try:
                 self.transfer(h)
             except ValueError as e:

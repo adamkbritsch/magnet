@@ -239,14 +239,15 @@ Only new episodes are fetched; following a show never downloads its back catalog
 - **The scout** is the part that decides when Sonarr searches: every 20 minutes for the
   first six hours after an episode airs, then every two hours until two days after it
   aired. Once a copy is grabbed, it looks for a better one for a week: every 20 minutes
-  for the first six hours, hourly until two days have passed, then every six hours. A
-  release is taken only if it beats the copy there is by the profile's minimum upgrade
-  — Sonarr checks that against the library's file, and Magnet checks it itself while a
-  finished copy is still on its way in. A download that stops moving for three hours, or
-  a first copy too slow to finish, is replaced.
+  for the first six hours, hourly until two days have passed, then every six hours. It
+  reads the results itself and takes a release only if it beats the best copy there
+  already is — downloading, finished, on its way to the NAS or in the library — by the
+  profile's minimum upgrade, so a second copy of what you have is never fetched. A
+  download that stops moving for three hours, or a first copy too slow to finish, is
+  replaced.
 - **The copy to the NAS** starts once a download the gate passed has finished, best copy
-  first. Sonarr copies it into the show's folder and names it; it counts as on the NAS
-  only when Sonarr records the import. One Sonarr leaves out because the library's copy
+  first, one per episode at a time. Sonarr copies it into the show's folder and names it;
+  it counts as on the NAS only when Sonarr records the import. One Sonarr leaves out because the library's copy
   is already as good is marked so. Any other copy that does not arrive is tried again over
   about two days (Sonarr will not import an episode still titled "TBA" until two days
   after it airs), and then **Bring to NAS** appears on the Seedbox tab so you can try it

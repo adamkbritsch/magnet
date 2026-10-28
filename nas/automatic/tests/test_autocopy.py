@@ -127,7 +127,32 @@ class AutoCopy(Harness):
         better = self.finished(CLEAN, score=13500)
         self.api.auto_transfer()
         self.assertEqual([c["downloadClientId"] for c in self.scans()], [better.upper()])
-        self.assertEqual(self.api.copy_states()[worse][0], None, "the scout retires it; it is not 'waiting'")
+        self.assertEqual(self.api.copy_states()[worse][0], "skipped", "the scout retires it; it is not 'waiting'")
+
+    def test_of_two_copies_as_good_only_one_goes(self):
+        a = self.finished(make_torrent("Show.S01E05.2160p.RAWR", [("Show.S01E05.2160p.RAWR.mkv", 5 * GB)]), score=13825)
+        b = self.finished(make_torrent("Show.S01E05.2160p.FLUX", [("Show.S01E05.2160p.FLUX.mkv", 5 * GB)]), score=13825)
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1)
+        first = self.scans()[0]["downloadClientId"].lower()
+        other = b if first == a else a
+        self.assertEqual(self.api.copy_states()[other][0], "skipped")
+        self.sn.imports[first.upper()] = [{"date": iso(time.time()), "data": {"importedPath": "/tv/x.mkv"}}]
+        self.api.check_transfers()
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1, "the second adds nothing")
+
+    def test_one_import_per_episode_at_a_time(self):
+        worse = self.finished(make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)]), score=500)
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1)
+        better = self.finished(CLEAN, score=13500)
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1, "not while the 1080p is still being imported")
+        self.sn.imports[worse.upper()] = [{"date": iso(time.time()), "data": {"importedPath": "/tv/x.mkv"}}]
+        self.api.check_transfers()
+        self.api.auto_transfer()
+        self.assertEqual([c["downloadClientId"].lower() for c in self.scans()], [worse, better])
 
     def test_a_failure_is_retried_then_left_to_the_button(self):
         h = self.finished(CLEAN)

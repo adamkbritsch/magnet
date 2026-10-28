@@ -8,17 +8,19 @@ RSS misses and what Sonarr will not do by itself:
 * Once a copy is grabbed, the episode has a week to find a better one. A 4K or Dolby
   Vision release usually follows the first copy within hours, so the scout asks Sonarr
   to search again every 20 minutes for the first six hours, then every hour until two
-  days have passed, then every six hours for the rest of the week. Sonarr takes a
-  release only if it beats the copy it has by the profile's minimum upgrade (Dolby
-  Vision first, every time). While a finished copy is still on its way into the
-  library, Sonarr has nothing to compare with, so the scout reads the search results
-  itself and takes only a release that beats that copy. After the week the episode is
-  unmonitored, so nothing changes it again.
+  days have passed, then every six hours for the rest of the week. It reads the search
+  results itself and takes a release only if it beats the best copy there already is
+  -- downloading, finished, on its way into the library or in it -- by the profile's
+  minimum upgrade (Dolby Vision first, every time). Sonarr cannot be left to judge
+  that: a finished download drops out of its queue, so it would compare only with the
+  library's file and take a second copy of what is already here. After the week the
+  episode is unmonitored, so nothing changes it again.
 * A download that stops moving -- no progress for three hours, or a magnet whose file
   list never arrives in two -- is dropped and marked failed, and Sonarr takes the next
   best release.
 * When a better copy has finished downloading, the copy it beats is removed from the
-  seedbox. Only this category's torrents, and never one being copied to the NAS.
+  seedbox, and so is a copy no better than one already on the NAS. Only this
+  category's torrents, and never one being copied to the NAS.
 """
 
 import datetime as dt
@@ -177,30 +179,18 @@ class Scout:
                 closing.append(eid)
             elif now - s.get("lastSearch", s["first"]) >= self.upgrade_interval(now - s["first"]):
                 due.append(eid)
-        waiting = []
         if due:
-            # An unfollowed show is not upgraded: Sonarr's searches started from here
-            # count as asked for by hand, which skips its own monitored check.
+            # An unfollowed show is not upgraded: these searches count as asked for by
+            # hand, which skips Sonarr's own monitored check.
             try:
-                eps = {e["id"]: e for e in self.sonarr.get("episode", episodeIds=due) or []}
+                watched = {e["id"] for e in self.sonarr.get("episode", episodeIds=due) or [] if e.get("monitored")}
             except SonarrError:
-                eps = {}
-            due = [e for e in due if eps.get(e, {}).get("monitored")]
-            # A copy that has finished but is not in the library yet leaves Sonarr with
-            # nothing to compare against -- no file, and a finished download drops out
-            # of its queue -- so a plain search would take whatever ranks first, usually
-            # the very copy that is here. Those are searched here instead.
-            waiting = [e for e in due if not eps[e].get("hasFile") and self._copy_finished(live.get(e, []))]
-            due = [e for e in due if e not in waiting]
-        self._search(due, "looking for a better copy")
-        for eid in waiting:
+                watched = set()
+            due = [e for e in due if e in watched]
+        for eid in due:
             self._grab_better(eid, self._state[str(eid)].get("best", 0))
         if closing:
             self._close(closing, live)
-
-    def _copy_finished(self, recs):
-        hashes = {(r.get("downloadId") or "").lower() for r in recs}
-        return any(h in self.gate.known and qbstate.is_finished(self.gate.known[h]) for h in hashes)
 
     def _grab_better(self, eid, best):
         """Search, and take a release only if it beats `best` by the profile's minimum
@@ -263,6 +253,10 @@ class Scout:
             return
         decisions = self.store.decisions()
         running = {t["hash"] for t in self.store.running_transfers()}
+        landed = {}                             # hash -> when its copy reached the NAS
+        for t in self.store.transfers(500):
+            if t["status"] == "done":
+                landed[t["hash"]] = max(landed.get(t["hash"], 0), t["updated"])
         mine = {h: t for h, t in self.gate.known.items() if decisions.get(h, {}).get("verdict") == "approved"}
         cover = {}                              # hash -> (score, episode ids)
         for h in mine:
@@ -274,7 +268,11 @@ class Scout:
         for h, (score, eps) in cover.items():
             if h in running or not eps:
                 continue
-            beaten = all(any(o != h and o in complete and s > score and e in oe for o, (s, oe) in cover.items())
+            # Beaten by a better finished copy -- or equalled by one that reached the NAS
+            # after it, which is the copy the library now holds.
+            beaten = all(any(o != h and o in complete and e in oe
+                             and (s > score or (s == score and landed.get(o, -1) > landed.get(h, -1)))
+                             for o, (s, oe) in cover.items())
                          for e in eps)
             if beaten:
                 name = mine[h].get("name", h)

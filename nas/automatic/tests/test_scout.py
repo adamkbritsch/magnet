@@ -77,7 +77,7 @@ class ScoutTests(Harness):
             self.now[0] = T0 + at
             self.scout.run_once()
             expected += searched
-            self.assertEqual(len(self.sn.searches()), expected, why)
+            self.assertEqual(len(self.sn.looked), expected, why)
 
     def test_the_pace_never_runs_slower_than_the_setting(self):
         scout = Scout(self.gate, self.sonarr, self.store, log=lambda m: None, upgrade_every_hours=0.25)
@@ -93,10 +93,10 @@ class ScoutTests(Harness):
         self.tick(7 * HOUR)
         self.scout.run_once()
         self.assertEqual(self.sn.monitor, [{"episodeIds": [5], "monitored": False}], "now it has one")
-        n = len(self.sn.searches())
+        n = len(self.sn.searches()) + len(self.sn.looked)
         self.tick(7 * HOUR)
         self.scout.run_once()
-        self.assertEqual(len(self.sn.searches()), n, "nothing more after it settles")
+        self.assertEqual(len(self.sn.searches()) + len(self.sn.looked), n, "nothing more after it settles")
         self.assertEqual(self.scout.status()["settled"], 1)
 
     # -- a better copy while the first is still on its way -------------------------------
@@ -130,15 +130,19 @@ class ScoutTests(Harness):
         self.assertEqual(self.sn.taken, [])
         self.now[0] = T0 + 32 * 60
         self.scout.run_once()
-        self.assertEqual(self.sn.taken, [], "and it still keeps to the pace")
+        self.assertEqual(self.sn.taken, [])
+        self.assertEqual(self.sn.looked, [5], "and it keeps to the pace")
 
-    def test_once_in_the_library_sonarr_compares_for_itself(self):
-        self._finished_first_copy(score=500)
+    def test_in_the_library_too_a_second_copy_as_good_is_not_taken(self):
+        # VisionQuest S01E05, 2026-10-28: the 4K copy finished and left Sonarr's queue,
+        # the library still held the 1080p, and a plain search took a second 4K copy.
+        self._finished_first_copy(score=13825)
         self.sn.has_file.add(5)
+        self.sn.releases[5] = [{"guid": "flux", "indexerId": 1, "approved": True, "customFormatScore": 13825}]
         self.now[0] = T0 + 21 * 60
         self.scout.run_once()
-        self.assertEqual(self.sn.searches(), [[5]])
         self.assertEqual(self.sn.taken, [])
+        self.assertEqual(self.sn.searches(), [], "never a plain search for a better copy")
 
     def test_an_upgrade_downloading_beside_the_first_copy_is_not_a_slow_first_copy(self):
         self.login()
@@ -192,6 +196,27 @@ class ScoutTests(Harness):
         self.assertNotIn(ha, self.qb.torrents)
         self.assertIn(hb, self.qb.torrents)
         self.assertEqual(self.store.decision(ha)["verdict"], "superseded")
+
+    def test_a_copy_as_good_as_the_one_on_the_nas_is_removed(self):
+        self.login()
+        a = make_torrent("Show.S01E05.2160p.DV.RAWR", [("Show.S01E05.2160p.DV.RAWR.mkv", 5 * GB)])
+        b = make_torrent("Show.S01E05.2160p.DV.FLUX", [("Show.S01E05.2160p.DV.FLUX.mkv", 5 * GB)])
+        self.add([a, b])
+        ha, hb = info_hash(a), info_hash(b)
+        for h in (ha, hb):
+            self.qb.torrents[h].update(progress=1.0, state="stalledUP")
+        self.grab(5, T0 - HOUR, 13825, ha)
+        self.grab(5, T0 - 30 * 60, 13825, hb)
+        self.gate.poll()
+        self.scout.run_once()
+        self.assertIn(ha, self.qb.torrents, "equals stay while neither is on the NAS")
+        self.assertIn(hb, self.qb.torrents)
+        tid = self.store.add_transfer(ha, "a", 1)
+        self.store.update_transfer(tid, "done")
+        self.scout.run_once()
+        self.assertIn(ha, self.qb.torrents)
+        self.assertNotIn(hb, self.qb.torrents, "it adds nothing to the copy in the library")
+        self.assertEqual(self.store.decision(hb)["verdict"], "superseded")
 
     def test_not_before_the_better_copy_has_finished(self):
         ha, hb = self._two_copies(better_done=False)
