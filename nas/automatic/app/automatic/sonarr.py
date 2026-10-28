@@ -59,6 +59,24 @@ class Sonarr:
             self._min_upgrade = max(1, int(found.get("minUpgradeFormatScore") or 1))
         return self._min_upgrade
 
+    def library_scores(self, episode_ids):
+        """{episode id: score of the file the library holds for it}, for the episodes that
+        have one. A file whose score cannot be read counts as unbeatable: nothing is
+        assumed lost or worse than it is."""
+        out = {}
+        ids = sorted(set(episode_ids))
+        for i in range(0, len(ids), 50):
+            for e in self.get("episode", episodeIds=ids[i:i + 50]) or []:
+                if not e.get("hasFile"):
+                    continue
+                score = float("inf")
+                if e.get("episodeFileId"):
+                    f = self.get(f"episodefile/{e['episodeFileId']}") or {}
+                    if f.get("customFormatScore") is not None:
+                        score = f["customFormatScore"]
+                out[e["id"]] = score
+        return out
+
     def alive(self):
         """A fast probe. A container frozen by stream-guard accepts the connection and never answers."""
         try:

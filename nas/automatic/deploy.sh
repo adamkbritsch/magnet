@@ -76,21 +76,22 @@ roots = []
 plex = mounts(env.get("PLEX_CONTAINER") or "plex")
 for m in mounts(env.get("SONARR_CONTAINER") or "sonarr"):
     hs, sd = m["Source"].rstrip("/"), m["Destination"].rstrip("/")
+    found = []
     for p in plex:
         hp, pd = p["Source"].rstrip("/"), p["Destination"].rstrip("/")
         if not hs or not hp:
             continue
-        if hs == hp or hs.startswith(hp + "/"):          # Sonarr's folder is inside Plex's
-            root = (hs, sd, pd + hs[len(hp):])
-        elif hp.startswith(hs + "/"):                     # Plex's folder is inside Sonarr's: just that part
-            root = (hp, sd + hp[len(hs):], pd)
-        else:
-            continue
+        if hs == hp or hs.startswith(hp + "/"):          # Sonarr's folder is inside Plex's: all of it
+            found = [(hs, sd, pd + hs[len(hp):])]
+            break
+        if hp.startswith(hs + "/"):                       # Plex's folders inside Sonarr's: each of them
+            found.append((hp, sd + hp[len(hs):], pd))
+    for root in found:
         if clashes(root[1]):
             print("    season folders: not mounting " + root[1] + " -- the service uses that path itself")
-        else:
+        elif root not in roots:
             roots.append(root)
-        break
+            print("    season folders: " + root[0] + " (Sonarr " + root[1] + ", Plex " + root[2] + ")")
 on = (env.get("SEASON_FOLDERS") or "true").lower() == "true" and bool(roots)
 lines = [l for l in open(".env") if not l.startswith("LIBRARY_MAP=")]
 lines.append("LIBRARY_MAP=" + ("|".join(">".join(r) for r in roots) if on else "") + "\n")

@@ -413,6 +413,8 @@ extension WebController: WKNavigationDelegate {
                         // A refusal seconds ago answers this too. Hijacks rotate
                         // hosts; people do not refuse one link and click another
                         // within a breath.
+                        NavigationLog.write("navigate", "no dialog for \(NavigationLog.describe(url)): a refusal "
+                            + "\(Int(Date().timeIntervalSince(last)))s ago answers it")
                         return
                     }
                     askToLeave(for: url)

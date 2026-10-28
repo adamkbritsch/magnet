@@ -53,6 +53,9 @@ class API:
     # episode is left to the Bring to NAS button. About two days in all, because
     # Sonarr refuses an episode still titled "TBA" for two days after it airs.
     AUTO_RETRY_DELAYS = (15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 24 * 3600)
+    # Such a refusal is not a failure to count: it ends two days after the episode airs,
+    # and the copy is simply tried again then.
+    TBA = "Sonarr will not import an episode still titled TBA"
 
     def __init__(self, gate, sonarr, store, token, path_map, plex=None, watched_days=30, log=print, sources=None,
                  scout=None, auto_copy=True, seasons=None, remove_after_copy=True):
@@ -152,7 +155,7 @@ class API:
         grabs = self._grabs_by_hash() if sonarr_up else {}
         decisions = self.store.decisions()
         running = {t["hash"] for t in self.store.running_transfers()}
-        done = {t["hash"] for t in self.store.transfers(500) if t["status"] == "done"}
+        done = {h for h, tr in self._transfer_history()[0].items() if tr["status"] == "done"}
         copies = self.copy_states(decisions, grabs if sonarr_up else None)
         # A finished download leaves Sonarr's queue, so its episode is named from the
         # grab instead -- otherwise the row shows only the torrent's own name.
@@ -435,24 +438,29 @@ class API:
                     imported = self._imported(tr["hash"], tr["created"])
                 except SonarrError:
                     continue
-                if imported:
-                    paths = {}
-                    for r in imported:
-                        p = (r.get("data") or {}).get("importedPath")
-                        if p and r.get("episodeId"):
-                            paths.setdefault((r.get("seriesId"), p), []).append(r["episodeId"])
-                    self.store.update_transfer(tr["id"], "done", next(iter(paths), (None, "imported"))[1])
-                    self.store.event("transferred", tr["hash"], f"{tr['name']}: on the NAS")
-                    if self.seasons and self.seasons.enabled():
-                        for (series, p), eps in paths.items():
-                            self.seasons.queue(series, p, eps)
-                    continue
-                # Nothing arrived. Kept only when the library really has this episode at
-                # least as good; anything else is a failure, and is tried again.
+                paths = {}
+                for r in imported:
+                    p = (r.get("data") or {}).get("importedPath")
+                    if p and r.get("episodeId"):
+                        paths.setdefault((r.get("seriesId"), p), []).append(r["episodeId"])
+                # Done only when every episode it was grabbed for arrived (a pack Sonarr
+                # partly took is tried again for the rest), or the library already has the
+                # rest as good. Anything else is a failure, and is tried again.
                 try:
-                    status, why = self._why_not_imported(tr["hash"])
+                    status, why, until = self._why_not_imported(tr["hash"], {r.get("episodeId") for r in imported})
                 except SonarrError:
                     continue
+                if self.seasons and self.seasons.enabled():
+                    for (series, p), eps in paths.items():
+                        self.seasons.queue(series, p, eps)
+                if status == "done":
+                    self.store.update_transfer(tr["id"], "done", next(iter(paths), (None, "imported"))[1])
+                    self.store.event("transferred", tr["hash"], f"{tr['name']}: on the NAS")
+                    continue
+                if until:
+                    wait = self.store.get("copy.wait", {})
+                    wait[tr["hash"]] = until
+                    self.store.put("copy.wait", {h: t for h, t in wait.items() if t > time.time() - 7 * 86400})
                 self.store.update_transfer(tr["id"], status, why)
                 self.store.event("kept" if status == "skipped" else "transfer", tr["hash"], f"{tr['name']}: {why}")
             elif c.get("status") in ("failed", "aborted", "cancelled", "orphaned"):
@@ -467,32 +475,43 @@ class API:
         recs = recs.get("records", []) if isinstance(recs, dict) else (recs or [])
         return [r for r in recs if (_ts(r.get("date")) or 0) >= since - 60]
 
-    def _why_not_imported(self, h):
-        """After a scan that imported nothing: ("skipped", why) when every episode it is
-        for already has a library file this copy does not beat by the profile's minimum
-        upgrade -- Sonarr was right to leave it -- else ("failed", why)."""
+    def _why_not_imported(self, h, got=()):
+        """After a scan, given the episodes it imported (`got`): ("done", ...) when every
+        episode the torrent was grabbed for arrived, or the rest already have a library
+        file this copy does not beat by the profile's minimum upgrade; ("skipped", why)
+        for that when nothing arrived; else ("failed", why). The third value is when to
+        try again for a TBA refusal, or None."""
         recs = self._grabs_by_hash().get(h, [])
-        eps = sorted({r["episodeId"] for r in recs if r.get("episodeId")})
+        grabbed = {r["episodeId"] for r in recs if r.get("episodeId")}
+        eps = sorted(grabbed - set(got))
+        if got and not eps:
+            return "done", "", None
         if not eps:
-            return "failed", "Sonarr finished without importing it"
+            return "failed", "Sonarr finished without importing it", None
         score = max((r.get("customFormatScore") or 0) for r in recs)
         need = self.sonarr.min_upgrade()
         episodes = self.sonarr.get("episode", episodeIds=eps) or []
-        kept = len(episodes) == len(eps)
+        short = []                      # episodes the library does not already hold as good
         for e in episodes:
-            if not e.get("hasFile") or not e.get("episodeFileId"):
-                kept = False
-                break
-            f = self.sonarr.get(f"episodefile/{e['episodeFileId']}") or {}
-            if score >= (f.get("customFormatScore") or 0) + need:
-                kept = False
-                break
+            f = (self.sonarr.get(f"episodefile/{e['episodeFileId']}") or {}) \
+                if e.get("hasFile") and e.get("episodeFileId") else None
+            if f is None or score >= (f.get("customFormatScore") or 0) + need:
+                short.append(e)
+        kept = len(episodes) == len(eps) and not short
         if kept:
-            return "skipped", "Sonarr kept the library's copy: this one is not better by enough to replace it"
-        if any((e.get("title") or "").strip().upper() == "TBA" for e in episodes):
-            return "failed", ("Sonarr will not import an episode still titled TBA until two days after it airs;"
-                              " Magnet keeps trying")
-        return "failed", "Sonarr finished without importing it"
+            if got:
+                return "done", "", None
+            return "skipped", "Sonarr kept the library's copy: this one is not better by enough to replace it", None
+        part = f" ({len(got)} of {len(grabbed)} episodes arrived)" if got else ""
+        # Sonarr's rule: no title, or "TBA", and aired less than two days ago.
+        now = time.time()
+        tba = [e for e in short if e.get("title") is not None and e["title"].strip().upper() in ("TBA", "")
+               and now - (_ts(e.get("airDateUtc")) or now) < 48 * 3600]
+        if tba:
+            aired = max((_ts(e.get("airDateUtc")) or time.time()) for e in tba)
+            return ("failed", f"{self.TBA} until two days after it airs; Magnet tries again then{part}",
+                    max(aired + 48 * 3600 + 15 * 60, time.time() + 15 * 60))
+        return "failed", f"Sonarr finished without importing it{part}", None
 
     def copy_states(self, decisions=None, grabs=None):
         """Torrent hash -> (copy status, message) for each finished, approved torrent:
@@ -501,11 +520,7 @@ class API:
         will take this one: Bring to NAS). The same rule auto_transfer acts on."""
         decisions = decisions if decisions is not None else self.store.decisions()
         grabs = grabs if grabs is not None else self._grabs_by_hash()
-        latest, failures = {}, {}
-        for tr in self.store.transfers(500):              # newest first
-            latest.setdefault(tr["hash"], tr)
-            if tr["status"] == "failed":
-                failures[tr["hash"]] = failures.get(tr["hash"], 0) + 1
+        latest, failures = self._transfer_history()
         finished = [h for h, t in self.gate.known.items()
                     if decisions.get(h, {}).get("verdict") == "approved" and qbstate.is_finished(t)]
         given_up = {h for h in finished if failures.get(h, 0) > len(self.AUTO_RETRY_DELAYS)}
@@ -521,18 +536,28 @@ class API:
         # while the library still has them.
         away = {h: {r["episodeId"] for r in grabs[h] if r.get("episodeId")} for h, d in decisions.items()
                 if d["verdict"] == "imported" and grabs.get(h) and h not in cover} if finished else {}
-        home = self._home_episodes(set().union(*away.values())) if away else set()
+        home = self._home_episodes(set().union(*away.values())) if away else {}
+        need = self.sonarr.min_upgrade() if away else 1
+        lowered = {}                    # imported rival -> {episode: what the library still holds}
         for h, eps in away.items():
-            if eps and eps <= home:
-                cover[h] = (max((r.get("customFormatScore") or 0) for r in grabs[h]), eps)
+            if eps and eps <= set(home):
+                score = max((r.get("customFormatScore") or 0) for r in grabs[h])
+                cover[h] = (score, eps)
+                # Only as good as the library's file -- where that is worse by a real
+                # margin; Sonarr scores a file a little apart from its release.
+                lowered[h] = {e: home[e] if home[e] + need <= score else score for e in eps}
                 settled.add(h)
 
         def beaten(h):
             """Every episode in it has a better finished copy, or one as good that is in
             the library or on its way there (between two untouched equals, one goes)."""
             score, eps = cover[h]
+
+            def rival(o, s, e):
+                return lowered.get(o, {}).get(e, s)
             return bool(eps) and all(any(o != h and o not in given_up and e in oe
-                                         and (s > score or (s == score and (o in settled or o < h)))
+                                         and (rival(o, s, e) > score
+                                              or (rival(o, s, e) == score and (o in settled or o < h)))
                                          for o, (s, oe) in cover.items()) for e in eps)
         out = {}
         for h in finished:
@@ -562,11 +587,8 @@ class API:
             return              # frozen while Plex streams; it catches up afterwards
         grabs = self._grabs_by_hash()
         states = self.copy_states(self.store.decisions(), grabs)
-        latest, failures = {}, {}
-        for tr in self.store.transfers(500):              # newest first
-            latest.setdefault(tr["hash"], tr)
-            if tr["status"] == "failed":
-                failures[tr["hash"]] = failures.get(tr["hash"], 0) + 1
+        latest, failures = self._transfer_history()
+        wait = self.store.get("copy.wait", {})
         now = time.time()
         # One import per episode at a time: Sonarr deletes the old file before copying
         # the new one, so two at once leave the episode without a file twice over.
@@ -588,6 +610,8 @@ class API:
             tries = failures.get(h, 0)
             if tries and now - latest[h]["updated"] < self.AUTO_RETRY_DELAYS[min(tries, len(self.AUTO_RETRY_DELAYS)) - 1]:
                 continue
+            if wait.get(h, 0) > now:
+                continue                # a TBA refusal: not before Sonarr will take it
             t = self.gate.known.get(h) or {}
             importing |= eps
             shows |= series
@@ -605,9 +629,7 @@ class API:
         if not self.remove_after_copy or not self.gate.last_poll or time.time() - self.gate.last_poll > 300:
             return
         decisions = self.store.decisions()
-        latest = {}
-        for tr in self.store.transfers(500):              # newest first
-            latest.setdefault(tr["hash"], tr)
+        latest = self._transfer_history()[0]
         for h, t in list(self.gate.known.items()):
             tr = latest.get(h)
             if not tr or tr["status"] not in ("done", "skipped") or decisions.get(h, {}).get("verdict") != "approved":
@@ -628,21 +650,33 @@ class API:
                               else "the library's copy is as good; removed from the seedbox")
 
     def _home_episodes(self, eids):
-        """Which of these episodes have a file in the library (asked at most once a minute
-        for the same set). Unanswerable counts as all of them: nothing is assumed lost."""
+        """{episode: score of the library's file} for those of these episodes that have
+        one (asked at most once a minute for the same set). Unanswerable counts as every
+        one there and unbeatable: nothing is assumed lost."""
         key = frozenset(eids)
         when, cached_key, cached = self._home_cache
         if key == cached_key and time.time() - when < 60:
             return cached
         try:
-            have = set()
-            ids = sorted(eids)
-            for i in range(0, len(ids), 50):
-                have |= {e["id"] for e in self.sonarr.get("episode", episodeIds=ids[i:i + 50]) or [] if e.get("hasFile")}
+            have = self.sonarr.library_scores(eids)
         except SonarrError:
-            return set(eids)
+            return {e: float("inf") for e in eids}
         self._home_cache = (time.time(), key, have)
         return have
+
+    def _transfer_history(self):
+        """Per torrent: its newest transfer row, and how many tries failed (a TBA refusal
+        is not one) -- counting only rows from its present stay on the seedbox. One added
+        again after an earlier copy starts afresh: that copy's rows say nothing about it."""
+        latest, failures = {}, {}
+        for tr in self.store.transfers(500):              # newest first
+            t = self.gate.known.get(tr["hash"])
+            if t and tr["created"] < (t.get("added_on") or 0):
+                continue
+            latest.setdefault(tr["hash"], tr)
+            if tr["status"] == "failed" and not (tr["message"] or "").startswith(self.TBA):
+                failures[tr["hash"]] = failures.get(tr["hash"], 0) + 1
+        return latest, failures
 
     def _all_home(self, h):
         """Every episode the torrent was grabbed for is in the library: imported from it,

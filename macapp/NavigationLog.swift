@@ -46,7 +46,9 @@ enum NavigationLog {
         if let handle = try? FileHandle(forWritingTo: file) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
-            handle.write(Data(line.utf8))
+            // The throwing form: the old write(_:) raises an exception Swift cannot catch
+            // on a full disk, and that would take the app down with it.
+            try? handle.write(contentsOf: Data(line.utf8))
         } else {
             try? Data(line.utf8).write(to: file)
         }

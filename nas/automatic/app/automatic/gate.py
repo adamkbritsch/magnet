@@ -232,17 +232,21 @@ class Gate:
     def _imported(self, h):
         """Already on the NAS -- and still there -- and removed from the seedbox: Sonarr
         grabbing it again is not a reason to download it again. If the library has lost
-        the episode, it is downloaded like any other grab."""
+        the episode, or holds only a worse file in its place, it is downloaded like any
+        other grab."""
         d = self.store.decision(h)
         if not d or d["verdict"] != "imported":
             return False
         try:
             recs = self.sonarr.get("history", downloadId=h.upper(), eventType=1, pageSize=50)
             recs = recs.get("records", recs) if isinstance(recs, dict) else (recs or [])
-            eps = sorted({r["episodeId"] for r in recs if r.get("episodeId")})
+            eps = {r["episodeId"] for r in recs if r.get("episodeId")}
             if not eps:
                 return True
-            return all(e.get("hasFile") for e in self.sonarr.get("episode", episodeIds=eps) or [])
+            score = max((r.get("customFormatScore") or 0) for r in recs)
+            have = self.sonarr.library_scores(eps)
+            need = self.sonarr.min_upgrade()
+            return all(e in have and score < have[e] + need for e in eps)
         except SonarrError:
             return True
 

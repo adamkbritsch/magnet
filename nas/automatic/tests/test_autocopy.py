@@ -48,7 +48,8 @@ class AutoCopy(Harness):
     def test_on_the_nas_only_when_sonarr_imported_it(self):
         h = self.finished(CLEAN)
         self.api.auto_transfer()
-        self.sn.imports[h.upper()] = [{"date": iso(time.time()), "data": {"importedPath": "/tv/Show/S01E05.mkv"}}]
+        self.sn.imports[h.upper()] = [{"date": iso(time.time()), "episodeId": 5,
+                                       "data": {"importedPath": "/tv/Show/S01E05.mkv"}}]
         self.api.check_transfers()
         self.assertEqual(self.store.transfers()[0]["status"], "done")
         row = self.api.seedbox()["torrents"][0]
@@ -337,9 +338,17 @@ class LeavesTheSeedbox(AutoCopy):
         self.gate.poll()
         self.api.auto_transfer()
         self.on_nas(h)                           # Sonarr imported episode 5 only
+        self.assertEqual(self.store.transfers()[0]["status"], "failed", "not done: episode 6 did not arrive")
+        self.assertIn("1 of 2 episodes", self.store.transfers()[0]["message"])
         self.api.retire_copied()
         self.assertIn(h, self.qb.torrents, "episode 6 is only on the seedbox")
         self.sn.has_file.add(6)                  # it reaches the library some other way
+        self.sn.episodes[6] = {"episodeFileId": 66}
+        self.sn.files[66] = {"customFormatScore": 900}
+        self.api.AUTO_RETRY_DELAYS = (0,) * 8
+        self.api.auto_transfer()                 # tried again for the rest
+        self.api.check_transfers()
+        self.assertEqual(self.store.transfers()[0]["status"], "done")
         self.api._not_home.clear()
         self.api.retire_copied()
         self.assertNotIn(h, self.qb.torrents)
@@ -365,3 +374,83 @@ class LeavesTheSeedbox(AutoCopy):
         self.assertTrue(self.api.seedbox()["removeAfterCopy"])
         self.api.remove_after_copy = False
         self.assertFalse(self.api.seedbox()["removeAfterCopy"])
+
+    def test_a_tba_refusal_waits_for_sonarr_and_is_not_counted_as_a_failure(self):
+        h = self.finished(CLEAN)
+        aired = time.time() - 3600
+        self.sn.episodes[5] = {"title": "TBA", "airDateUtc": iso(aired)}
+        self.api.AUTO_RETRY_DELAYS = (0,) * 8
+        self.api.auto_transfer()
+        self.api.check_transfers()
+        self.assertIn("TBA", self.store.transfers()[0]["message"])
+        for _ in range(12):
+            self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1, "not before two days after it aired")
+        self.assertEqual(self.api.copy_states()[h][0], "waiting", "and never given up on for it")
+        wait = self.store.get("copy.wait")
+        self.assertAlmostEqual(wait[h], aired + 48 * 3600 + 15 * 60, delta=5)
+        self.store.put("copy.wait", {h: time.time() - 1})
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 2)
+
+    def test_the_same_release_downloaded_again_after_the_library_lost_it_is_copied_again(self):
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.on_nas(h)
+        self.api.retire_copied()                 # removed; then the library loses episode 5
+        self.assertEqual(self.add([CLEAN])[:2], (200, b"Ok."))
+        self.qb.torrents[h].update(progress=1.0, state="stoppedUP", amount_left=0, added_on=int(time.time()) + 2)
+        self.gate.poll()
+        self.assertEqual(self.api.copy_states()[h][0], "waiting", "the old copy's record is not this one's")
+        self.assertFalse(self.api.seedbox()["torrents"][0]["onNAS"])
+        time.sleep(2.1)
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 2)
+
+    def test_a_copy_on_the_nas_counts_only_as_far_as_the_library_still_holds_it(self):
+        better = self.finished(CLEAN, score=13500)
+        self.api.auto_transfer()
+        self.on_nas(better)
+        self.api.retire_copied()
+        self.sn.has_file.add(5)                  # the library now holds a worse file in its place
+        self.sn.episodes[5] = {"episodeFileId": 55}
+        self.sn.files[55] = {"customFormatScore": 500}
+        self.api._home_cache = (0.0, None, {})
+        other = self.finished(make_torrent("Show.S01E05.2160p.DV.OTHER", [("Show.S01E05.2160p.DV.OTHER.mkv", 5 * GB)]),
+                              score=13500)
+        self.assertEqual(self.api.copy_states()[other][0], "waiting")
+
+    def test_sonarr_grabbing_the_lost_better_copy_again_downloads_it(self):
+        h = self.finished(CLEAN, score=13500)
+        self.api.auto_transfer()
+        self.on_nas(h)
+        self.api.retire_copied()
+        self.sn.has_file.add(5)                  # a worse file took its place
+        self.sn.episodes[5] = {"episodeFileId": 55}
+        self.sn.files[55] = {"customFormatScore": 500}
+        self.add([CLEAN])
+        self.assertIn(h, self.qb.torrents)
+
+    def test_an_equal_second_copy_is_not_sent_because_sonarr_scores_the_file_a_little_lower(self):
+        a = self.finished(make_torrent("Show.S01E05.2160p.RAWR", [("Show.S01E05.2160p.RAWR.mkv", 5 * GB)]), score=13825)
+        b = self.finished(make_torrent("Show.S01E05.2160p.FLUX", [("Show.S01E05.2160p.FLUX.mkv", 5 * GB)]), score=13825)
+        self.api.auto_transfer()
+        first = self.scans()[0]["downloadClientId"].lower()
+        other = b if first == a else a
+        self.on_nas(first)
+        self.sn.has_file.add(5)                  # Sonarr scores the file it imported 50 lower
+        self.sn.episodes[5] = {"episodeFileId": 55}
+        self.sn.files[55] = {"customFormatScore": 13775}
+        self.api.retire_copied()
+        self.api._home_cache = (0.0, None, {})
+        self.assertEqual(self.api.copy_states()[other][0], "skipped")
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1, "no second import of an equal release")
+
+    def test_an_old_episode_titled_tba_is_an_ordinary_failure(self):
+        h = self.finished(CLEAN)
+        self.sn.episodes[5] = {"title": "TBA", "airDateUtc": iso(time.time() - 30 * 86400)}
+        self.api.auto_transfer()
+        self.api.check_transfers()
+        self.assertNotIn("TBA", self.store.transfers()[0]["message"], "Sonarr's two-day rule cannot be why")
+        self.assertNotIn(h, self.store.get("copy.wait", {}))

@@ -142,9 +142,18 @@ will not do — a sign-in, a payment page, a download it refuses.
   article — and from FMHY's published list, which is on unless you turn it off there.
 - **Cloudflare's check.** While it runs, the page is covered with a "clearing the check"
   note rather than an empty-looking listing, for at most 15 seconds.
-- **Your picks stay on this Mac.** Each torrent you send is logged locally
+- **Your picks are logged on this Mac.** Each torrent you send is logged locally
   (`~/.claude/prompt-log/torrent-choices.jsonl`) so Automatic can suggest shows you
-  already like. Nothing is sent anywhere.
+  already like. When you open the Suggestions tab, the names of your 60 most recent
+  picks go to your NAS, and a show title Sonarr does not already know is looked up
+  through Sonarr's online metadata service. Nothing else from the log leaves the Mac.
+- **A record of what it decided.** Each page load the browser allows, blocks or asks
+  about — and which rule decided — is written to
+  `~/Library/Logs/Magnet/navigation.log`, with responses, failures and dropped pop-ups,
+  so a site that stops partway can be traced. Addresses are kept to scheme, host and
+  path (a site that puts its search in the path keeps it there); query strings and
+  anything typed into a form are never written. The file stays on this Mac and is
+  capped at 2 MB.
 
 ## The file downloader (Files)
 
@@ -248,15 +257,18 @@ Only new episodes are fetched; following a show never downloads its back catalog
   replaced.
 - **The copy to the NAS** starts once a download the gate passed has finished, best copy
   first, one per show at a time. Sonarr copies it into the show's folder and names it;
-  it counts as on the NAS only when Sonarr records the import, and then the torrent and
-  its files leave the seedbox (`REMOVE_AFTER_COPY=false` keeps them). While the episode
-  is in the library, Sonarr grabbing that release again does not download it again; if
-  the library loses it within its week, it is fetched again. One Sonarr leaves out because the library's copy
-  is already as good is marked so. Any other copy that does not arrive is tried again over
-  about two days (Sonarr will not import an episode still titled "TBA" until two days
-  after it airs), and then **Bring to NAS** appears on the Seedbox tab so you can try it
-  yourself. Set `AUTO_COPY=false` in `site.env` to leave every episode on the seedbox
-  until you press **Bring to NAS**.
+  it counts as on the NAS only when Sonarr records the import — for a season pack, of
+  every episode it was grabbed for. One Sonarr leaves out because the library's copy is
+  already as good is marked so. Any other copy that does not arrive is tried again over
+  about two days, and then **Bring to NAS** appears on the Seedbox tab so you can try it
+  yourself; one Sonarr refuses because the episode is still titled "TBA" waits until two
+  days after it aired, when Sonarr will take it. Set `AUTO_COPY=false` in `site.env` to
+  leave every episode on the seedbox until you press **Bring to NAS**.
+- **Done downloads leave the seedbox.** Once a copy is on the NAS, the torrent and its
+  files are removed (`REMOVE_AFTER_COPY=false` keeps them). The removed copy is still the
+  one to beat, as far as the library still holds it: Sonarr grabbing that release again
+  does not download it again, but if the library loses the episode within its week, or
+  a worse file takes its place, it is fetched again.
 - **Season folders are read the way Plex reads them.** Each episode goes into the folder
   Plex already files that season under, whatever it is called; a season the show does
   not have yet gets a folder named like its others ("Season 3", or "Season 03" where the

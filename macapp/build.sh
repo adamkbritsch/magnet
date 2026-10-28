@@ -25,7 +25,7 @@ INSTALLED="${MAGNET_INSTALL_PATH:-$HOME/Applications/Magnet.app}"
 # every setting, every saved credential and every macOS permission grant.
 BUNDLE_ID="${MAGNET_BUNDLE_ID:-com.example.magnet}"
 EXEC_NAME="Magnet"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

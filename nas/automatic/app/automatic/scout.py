@@ -67,7 +67,7 @@ class Scout:
         # Series whose files the season-folder worker is moving: Sonarr can briefly report
         # no file for them, which is not the same as the file being gone.
         self.placing = lambda: set()
-        self._home = set()
+        self._home = {}
         self.last_run = 0.0
         self.last_error = ""
 
@@ -119,9 +119,10 @@ class Scout:
         self.last_run = now
 
     def _still_home(self, by_ep):
-        """Episodes whose copy went from the seedbox to the NAS and are still in the
-        library. Such a copy is the one to beat only while it is there: an episode whose
-        file was deleted has no copy, and may be fetched again within its week."""
+        """{episode: score of the library's file} for episodes whose copy went from the
+        seedbox to the NAS and that still have a file. Such a copy is the one to beat only
+        as far as the library still holds it: an episode whose file was deleted has no
+        copy, and one whose file was replaced by a worse one has only that."""
         decisions = self.store.decisions()
         imported = {}
         for eid, recs in by_ep.items():
@@ -129,17 +130,26 @@ class Scout:
                 if decisions.get((r.get("downloadId") or "").lower(), {}).get("verdict") == "imported":
                     imported[eid] = r.get("seriesId")
         if not imported:
-            return set()
+            return {}
         placing = self.placing()
-        home = {e for e, series in imported.items() if series in placing}
         try:
-            ids = sorted(imported)
-            for i in range(0, len(ids), 50):
-                home |= {e["id"] for e in self.sonarr.get("episode", episodeIds=ids[i:i + 50]) or []
-                         if e.get("hasFile")}
+            home = self.sonarr.library_scores(imported)
         except SonarrError:
-            return set(imported)        # cannot tell: assume nothing was lost
+            return {e: float("inf") for e in imported}     # cannot tell: assume nothing was lost
+        # Files being moved between season folders can briefly read as gone.
+        home.update({e: float("inf") for e, series in imported.items() if series in placing})
         return home
+
+    def _worth(self, r, eid):
+        """A grab's score as a copy there is: an imported one counts only as far as the
+        library's file for its episode."""
+        score = r.get("customFormatScore") or 0
+        d = self.store.decision((r.get("downloadId") or "").lower())
+        if d and d["verdict"] == "imported":
+            have = self._home.get(eid, float("-inf"))
+            # Sonarr scores a file a little apart from its release: only a real margin counts.
+            return have if have + self.sonarr.min_upgrade() <= score else score
+        return score
 
     def _imported_away(self, r, eid):
         """A grab that reached the NAS and was removed from the seedbox, but whose episode
@@ -207,9 +217,10 @@ class Scout:
             s["first"] = min(s.get("first", first), first)
             # A copy the library has lost is no copy at all: nothing to beat.
             present = [r for r in recs if not self._imported_away(r, eid)]
-            best = max(present, key=lambda r: r.get("customFormatScore") or 0) if present else {}
-            s["best"] = best.get("customFormatScore") or 0
+            best = max(present, key=lambda r: self._worth(r, eid)) if present else {}
+            s["best"] = self._worth(best, eid) if present else 0
             s["bestTitle"] = best.get("sourceTitle", "")
+            s["hasCopy"] = bool(present)
             if s.get("closed"):
                 continue
             if now - s["first"] >= self.window:
@@ -225,20 +236,23 @@ class Scout:
                 watched = set()
             due = [e for e in due if e in watched]
         for eid in due:
-            self._grab_better(eid, self._state[str(eid)].get("best", 0))
+            s = self._state[str(eid)]
+            # No copy left at all (the library lost it): any release Sonarr approves will do.
+            self._grab_better(eid, s.get("best", 0) if s.get("hasCopy", True) else None)
         if closing:
             self._close(closing, live)
 
     def _grab_better(self, eid, best):
         """Search, and take a release only if it beats `best` by the profile's minimum
-        upgrade -- what Sonarr itself would demand of a copy in the library."""
+        upgrade -- what Sonarr itself would demand of a copy in the library. With `best`
+        None there is no copy to beat, and the best release Sonarr approves is taken."""
         s = self._state.setdefault(str(eid), {})
         s["lastSearch"] = self.now()
         s["searches"] = s.get("searches", 0) + 1
         self.store.put("scout.episodes", self._state)
         try:
             found = self.sonarr.call("GET", "release", {"episodeId": eid}, timeout=180) or []
-            need = best + self.sonarr.min_upgrade()
+            need = float("-inf") if best is None else best + self.sonarr.min_upgrade()
         except SonarrError as e:
             self.log(f"scout: could not search for a better copy of episode {eid}: {e}")
             return
@@ -253,7 +267,7 @@ class Scout:
             self.log(f"scout: could not take {pick.get('title')}: {e}")
             return
         self.log(f"scout: took {pick.get('title')} (score {pick.get('customFormatScore')}) for episode {eid}"
-                 f" -- better than the copy on its way to the library (score {best})")
+                 + (" -- the library has no copy of it" if best is None else f" -- better than the copy there is (score {best})"))
 
     def _close(self, closing, live):
         """The week is over. Only an episode that really has a copy -- finished on the
@@ -300,13 +314,16 @@ class Scout:
                 landed[t["hash"]] = max(landed.get(t["hash"], 0), t["updated"])
         mine = {h: t for h, t in self.gate.known.items() if decisions.get(h, {}).get("verdict") == "approved"}
         # A copy already on the NAS has left the seedbox, but it is still the one to beat.
-        imported = {h for h, d in decisions.items() if d["verdict"] == "imported"
+        imported = {h for h, d in decisions.items() if d["verdict"] == "imported" and by_hash.get(h)
                     and all(r.get("episodeId") in self._home for r in by_hash.get(h, []))}
         cover = {}                              # hash -> (score, episode ids)
         for h in set(mine) | imported:
             recs = by_hash.get(h, [])
             if recs:
-                cover[h] = (max(r.get("customFormatScore") or 0 for r in recs), {r["episodeId"] for r in recs})
+                score = max(r.get("customFormatScore") or 0 for r in recs)
+                if h in imported:       # only as good as what the library still holds
+                    score = min(self._worth(r, r["episodeId"]) for r in recs)
+                cover[h] = (score, {r["episodeId"] for r in recs})
         # Finished the way qBittorrent shows it: every byte, and no check running.
         complete = {h for h, t in mine.items() if qbstate.is_finished(t)} | (imported & set(cover))
         for h, (score, eps) in cover.items():
@@ -356,6 +373,7 @@ class Scout:
             # the first copy and is judged as one.
             mine = min((_ts(r.get("date")) or now) for r in by_hash.get(h, []))
             if any((r.get("downloadId") or "").lower() != h and (_ts(r.get("date")) or now) < mine
+                   and not self._imported_away(r, e)
                    for e in eps for r in live.get(e, [])):
                 continue
             try:

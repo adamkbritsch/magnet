@@ -175,6 +175,43 @@ class ScoutTests(Harness):
         self.scout.run_once()
         self.assertEqual(self.sn.taken, [{"guid": "dv", "indexerId": 2}])
 
+    def test_a_lost_low_scoring_episode_is_fetched_again_too(self):
+        # Public 1080p with no release group scores 0: with nothing left to beat, any
+        # release Sonarr approves will do -- not only one 100 points better than nothing.
+        self.grab(5, T0, 0, "e" * 40, verdict="imported")
+        self.sn.releases[5] = [{"guid": "zero", "indexerId": 1, "approved": True, "customFormatScore": 0},
+                               {"guid": "fifty", "indexerId": 1, "approved": True, "customFormatScore": 50},
+                               {"guid": "banned", "indexerId": 1, "approved": False, "customFormatScore": 900}]
+        self.now[0] = T0 + 3 * DAY
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [{"guid": "fifty", "indexerId": 1}])
+
+    def test_a_removed_copy_counts_only_as_far_as_the_library_still_holds_it(self):
+        # The DV copy reached the NAS and left the seedbox; then a 1080p took its place.
+        self.grab(5, T0, 13500, "e" * 40, verdict="imported")
+        self.sn.has_file.add(5)
+        self.sn.episodes[5] = {"episodeFileId": 55}
+        self.sn.files[55] = {"customFormatScore": 500}
+        self.sn.releases[5] = [{"guid": "dv", "indexerId": 2, "approved": True, "customFormatScore": 13500}]
+        self.now[0] = T0 + 21 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [{"guid": "dv", "indexerId": 2}])
+
+    def test_a_slow_refetch_after_the_library_lost_it_is_still_a_first_copy(self):
+        self.grab(5, T0 - DAY, 13500, "e" * 40, verdict="imported")      # gone from the library
+        self.login()
+        x = make_torrent("Show.S01E05.again", [("Show.S01E05.again.mkv", 2 * GB)])
+        self.add([x])
+        hx = info_hash(x)
+        self.qb.torrents[hx].update(progress=0.1, state="downloading", eta=9 * 3600)
+        self.grab(5, T0, 500, hx)
+        self.gate.poll()
+        self.scout.run_once()
+        self.tick(31 * 60)
+        self.gate.poll()
+        self.scout.run_once()
+        self.assertNotIn(hx, self.qb.torrents, "too slow, and there is nothing else on its way")
+
     def test_but_not_while_its_files_are_being_moved_between_season_folders(self):
         self.sn.history.append({"episodeId": 5, "seriesId": 9, "date": iso(T0), "customFormatScore": 13500,
                                 "downloadId": ("e" * 40).upper(), "sourceTitle": "x", "customFormats": [],

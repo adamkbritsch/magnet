@@ -43,6 +43,9 @@ class StubSonarr:
             return {"id": 1, "status": "queued"}
         return body
 
+    def alive(self):
+        return not getattr(self, "paused", False)
+
     def rescans(self):
         return [b for m, p, b in self.calls if p == "command" and b.get("name") == "RescanSeries"]
 
@@ -377,6 +380,61 @@ class AfterReview(SeasonFolders):
         self.seasons._move(job)
         self.assertIn([src, dst], job["done"])
         self.assertEqual(sorted(self.ls("Season 1")), ["Show - S01E01.mkv", "Show - S01E02.mkv"])
+
+
+class Streaming(SeasonFolders):
+    def test_a_paused_sonarr_is_waited_for_not_counted(self):
+        self.file("S01/Show - S01E01.mkv", 1, 1)
+        new = self.imported("Season 01/Show - S01E02.mkv", 1, 2)
+        self.seasons.queue(7, new, [501])
+        self.sonarr.paused = True
+        for _ in range(20):
+            self.seasons.tick()
+        self.assertEqual(self.seasons.busy(), {7}, "still waiting, nothing given up")
+        self.assertTrue(os.path.exists(new), "and nothing moved while Sonarr could not be told")
+        self.sonarr.paused = False
+        self.seasons.tick()
+        self.seasons.tick()
+        self.assertEqual(self.seasons.busy(), set())
+        self.assertEqual(len(self.sonarr.rescans()), 1)
+
+    def test_after_the_moves_a_job_is_never_dropped_on_a_count(self):
+        self.file("S01/Show - S01E01.mkv", 1, 1)
+        new = self.imported("Season 01/Show - S01E02.mkv", 1, 2)
+        self.sonarr.fail_post = 10               # Sonarr answers alive but refuses the rescan
+        self.seasons.queue(7, new, [501])
+        for _ in range(8):
+            self.seasons.tick()
+        self.assertEqual(self.seasons.busy(), {7}, "the files moved: Sonarr must still be told")
+        self.sonarr.fail_post = 0
+        self.seasons.tick()
+        self.seasons.tick()
+        self.assertEqual(len(self.sonarr.rescans()), 1)
+        self.assertEqual(self.seasons.busy(), set())
+
+
+class PartlyMoved(SeasonFolders):
+    def test_a_file_that_cannot_move_stays_and_the_rest_are_still_told(self):
+        self.file("S03/Show - S03E01.mkv", 3, 1)
+        self.file("S03/Show - S03E02.mkv", 3, 2)
+        new = self.imported("Season 03/Show - S03E03.mkv", 3, 3)
+        real = os.rename
+
+        def rename(src, dst):
+            if src == new:
+                raise PermissionError(13, "Permission denied")
+            return real(src, dst)
+        os.rename = rename
+        try:
+            self.seasons.queue(7, new, [501])
+            for _ in range(3):
+                self.seasons.tick()
+        finally:
+            os.rename = real
+        self.assertEqual(self.ls("Season 3"), ["Show - S03E01.mkv", "Show - S03E02.mkv"])
+        self.assertTrue(os.path.exists(new), "left where it was")
+        self.assertEqual(len(self.sonarr.rescans()), 1, "Sonarr still hears of the two that moved")
+        self.assertEqual(self.seasons.busy(), set())
 
 
 class Paths(unittest.TestCase):

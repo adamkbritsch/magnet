@@ -193,6 +193,10 @@ class Seasons:
         return {j["series"] for j in self.store.get("seasons.queue", [])}
 
     def tick(self):
+        # A Sonarr paused for a Plex stream is not a failure to count: wait for it.
+        if self.store.get("seasons.queue", []) and not self.sonarr.alive():
+            self._rewatch()
+            return
         for job in list(self.store.get("seasons.queue", [])):
             try:
                 if self._advance(job):
@@ -202,7 +206,12 @@ class Seasons:
             except (SonarrError, OSError, urllib.error.URLError, ValueError) as e:
                 job["tries"] = job.get("tries", 0) + 1
                 self.log(f"seasons: {os.path.basename(job['path'])}: {e}")
-                if job["tries"] >= self.TRIES:
+                # Files already moved: Sonarr must still hear of it, so such a job is let
+                # go only after hours, never on a count of tries.
+                moved = job.get("phase") in ("moved", "rescan")
+                if moved and self.now() - job.get("moved_at", job["at"]) < self.RESCAN_GIVE_UP:
+                    self._save(job)
+                elif job["tries"] >= self.TRIES or moved:
                     self.store.event("season", "", f"{os.path.basename(job['path'])}: gave up putting it in its"
                                                    f" season folder ({e})")
                     self._drop(job)
@@ -386,10 +395,17 @@ class Seasons:
                 if src == owner:
                     skipped.add(owner)
                 continue
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            os.rename(src, dst)
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.rename(src, dst)
+            except OSError as e:
+                # One that cannot move stays where it is, with its subtitles; the rest
+                # go on, and Sonarr and Plex still hear of them.
+                skipped.add(owner)
+                self.store.event("season", "", f"{os.path.basename(src)}: could not move it ({e}); left where it is")
+                continue
             done.append([src, dst])
-        job.update(phase="moved", done=done)
+        job.update(phase="moved", done=done, moved_at=self.now())
         self._save(job)
 
     def _after_move(self, job):
