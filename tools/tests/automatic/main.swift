@@ -78,7 +78,11 @@ do {
               o.seedbox.torrents[0].canBringToNAS == button && o.seedbox.autoCopy == true,
               "copyStatus \(String(describing: o.seedbox.torrents[0].copyStatus))")
     }
+    let removing = try JSONDecoder().decode(AutoOverview.self, from: Data(torrent("null").replacingOccurrences(
+        of: #""autoCopy": true}"#, with: #""autoCopy": true, "removeAfterCopy": true}"#).utf8))
+    check("whether copies leave the seedbox is read", removing.seedbox.removeAfterCopy == true)
     let old = try JSONDecoder().decode(AutoOverview.self, from: Data(overviewJSON.utf8))
+    check("an older NAS does not say", old.seedbox.removeAfterCopy == nil)
     check("a NAS that never copies by itself keeps the button", old.seedbox.autoCopy == nil
           && old.seedbox.torrents[0].copyStatus == nil && old.seedbox.torrents[0].canBringToNAS)
 } catch {

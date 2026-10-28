@@ -6,10 +6,11 @@ a season of surprise downloads. Unfollowing only stops monitoring; nothing on di
 is ever touched from here.
 
 An episode that passed the gate is copied to the NAS as soon as it finishes on the
-seedbox. Sonarr does the copy (Copy, not Move, so the seedbox keeps its copy) and
-names the file into the right show folder; a better copy found later replaces the
-file, and one that is not better is left out. Bring to NAS is the same copy by hand,
-for when the automatic one has given up.
+seedbox. Sonarr does the copy and names the file into the right show folder; a better
+copy found later replaces the file, and one that is not better is left out. Once the
+copy is there -- Sonarr's import recorded, or the library's own copy as good -- the
+torrent and its files leave the seedbox. Bring to NAS is the same copy by hand, for
+when the automatic one has given up.
 """
 
 import datetime as dt
@@ -54,8 +55,11 @@ class API:
     AUTO_RETRY_DELAYS = (15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 24 * 3600)
 
     def __init__(self, gate, sonarr, store, token, path_map, plex=None, watched_days=30, log=print, sources=None,
-                 scout=None, auto_copy=True, seasons=None):
+                 scout=None, auto_copy=True, seasons=None, remove_after_copy=True):
         self.auto_copy = auto_copy
+        self.remove_after_copy = remove_after_copy
+        self._not_home = {}       # hash -> when it was last found not wholly in the library
+        self._home_cache = (0.0, None, set())
         self.seasons = seasons    # Seasons, or None: Sonarr's own folder is kept
         self._transfer_lock = threading.Lock()
         self._episodes = {}       # episode id -> (when, episode record), for naming seedbox rows
@@ -178,7 +182,7 @@ class API:
                         "copyStatus": copies.get(h, (None, ""))[0], "copyMessage": copies.get(h, (None, ""))[1],
                         "score": score, "formats": formats, "betterUntil": _iso(ends)})
         return {"torrents": out, "freeBytes": self.gate.free_bytes, "minFreeBytes": self.gate.min_free,
-                "autoCopy": self.auto_copy}
+                "autoCopy": self.auto_copy, "removeAfterCopy": self.remove_after_copy}
 
     def _name_episodes(self, grabs, titles):
         """Torrent hash -> (series title, episode) for the torrents on the seedbox, from
@@ -513,6 +517,15 @@ class API:
                             {r["episodeId"] for r in grabs[h] if r.get("episodeId")})
 
         settled = {h for h in cover if latest.get(h) and latest[h]["status"] in ("running", "done", "skipped")}
+        # Copies already on the NAS and gone from the seedbox still count as rivals --
+        # while the library still has them.
+        away = {h: {r["episodeId"] for r in grabs[h] if r.get("episodeId")} for h, d in decisions.items()
+                if d["verdict"] == "imported" and grabs.get(h) and h not in cover} if finished else {}
+        home = self._home_episodes(set().union(*away.values())) if away else set()
+        for h, eps in away.items():
+            if eps and eps <= home:
+                cover[h] = (max((r.get("customFormatScore") or 0) for r in grabs[h]), eps)
+                settled.add(h)
 
         def beaten(h):
             """Every episode in it has a better finished copy, or one as good that is in
@@ -586,10 +599,76 @@ class API:
             except (SonarrError, UpstreamError, AuthRejected):
                 return          # nothing to record: Sonarr or the seedbox is not answering
 
+    def retire_copied(self):
+        """A copy on the NAS -- or one Sonarr left out because the library's is as good --
+        has nothing more to do on the seedbox: the torrent and its files are removed."""
+        if not self.remove_after_copy or not self.gate.last_poll or time.time() - self.gate.last_poll > 300:
+            return
+        decisions = self.store.decisions()
+        latest = {}
+        for tr in self.store.transfers(500):              # newest first
+            latest.setdefault(tr["hash"], tr)
+        for h, t in list(self.gate.known.items()):
+            tr = latest.get(h)
+            if not tr or tr["status"] not in ("done", "skipped") or decisions.get(h, {}).get("verdict") != "approved":
+                continue
+            # Only the copy of this very download: one added again since is not finished
+            # with, and its old record says nothing about it.
+            if not qbstate.is_finished(t) or tr["created"] < (t.get("added_on") or 0):
+                continue
+            if time.time() - self._not_home.get(h, 0) < 600 or not self._all_home(h):
+                continue
+            name = t.get("name") or h
+            try:
+                self.qbit.delete([h])
+            except (UpstreamError, AuthRejected, ValueError) as e:
+                self.log(f"transfers: could not remove {name} from the seedbox: {e}")
+                continue
+            self.store.decide(h, "imported", name, "on the NAS; removed from the seedbox" if tr["status"] == "done"
+                              else "the library's copy is as good; removed from the seedbox")
+
+    def _home_episodes(self, eids):
+        """Which of these episodes have a file in the library (asked at most once a minute
+        for the same set). Unanswerable counts as all of them: nothing is assumed lost."""
+        key = frozenset(eids)
+        when, cached_key, cached = self._home_cache
+        if key == cached_key and time.time() - when < 60:
+            return cached
+        try:
+            have = set()
+            ids = sorted(eids)
+            for i in range(0, len(ids), 50):
+                have |= {e["id"] for e in self.sonarr.get("episode", episodeIds=ids[i:i + 50]) or [] if e.get("hasFile")}
+        except SonarrError:
+            return set(eids)
+        self._home_cache = (time.time(), key, have)
+        return have
+
+    def _all_home(self, h):
+        """Every episode the torrent was grabbed for is in the library: imported from it,
+        or already there. A pack Sonarr only partly took keeps the rest on the seedbox."""
+        eps = {g["episodeId"] for g in self._grabs_by_hash().get(h, []) if g.get("episodeId")}
+        try:
+            recs = self.sonarr.get("history", downloadId=h.upper(), eventType=3, pageSize=200)
+            recs = recs.get("records", []) if isinstance(recs, dict) else (recs or [])
+            # Brought over by hand, never grabbed by Sonarr: the episodes it was filed under.
+            eps = eps or {r["episodeId"] for r in recs if r.get("episodeId")}
+            missing = eps - {r.get("episodeId") for r in recs}
+            if missing:
+                missing -= {e["id"] for e in self.sonarr.get("episode", episodeIds=sorted(missing)) or []
+                            if e.get("hasFile")}
+        except SonarrError:
+            return False
+        if missing or not eps:
+            self._not_home[h] = time.time()
+            return False
+        return True
+
     def watch_transfers(self, interval=10):
         while True:
             try:
                 self.check_transfers()
+                self.retire_copied()
                 self.auto_transfer()
             except Exception as e:
                 # A worker that dies silently leaves every transfer "on its way" forever.

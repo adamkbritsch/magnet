@@ -78,8 +78,11 @@ def main():
                           skip=os.environ.get("SEASON_SKIP", "").split("|"), data_dir=data)
     api = API(gate, sonarr, store, env("API_TOKEN"), (src, dst), plex_access(),
               int(env("SUGGEST_WATCHED_DAYS", "30")), log, sources, scout,
-              auto_copy=env("AUTO_COPY", "true").lower() == "true", seasons=seasons)
+              auto_copy=env("AUTO_COPY", "true").lower() == "true", seasons=seasons,
+              remove_after_copy=env("REMOVE_AFTER_COPY", "true").lower() == "true")
 
+    if seasons:
+        scout.placing = seasons.busy
     threading.Thread(target=gate.run, name="watcher", daemon=True).start()
     threading.Thread(target=api.watch_transfers, name="transfers", daemon=True).start()
     if sources:

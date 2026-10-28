@@ -108,6 +108,8 @@ struct AutoSeedbox: Codable, Hashable {
     let minFreeBytes: Int64?
     /// Whether the NAS copies finished episodes by itself.
     let autoCopy: Bool?
+    /// Whether a copy that reached the NAS leaves the seedbox, torrent and files.
+    let removeAfterCopy: Bool?
 }
 
 struct AutoBlocked: Codable, Hashable, Identifiable {
@@ -718,7 +720,9 @@ final class AutomaticModel: ObservableObject {
         defer { busy.remove(t.hash) }
         do {
             try await client.bringToNAS(hash: t.hash)
-            notice = "Copying \(t.series ?? t.name ?? "the episode") to the NAS. The seedbox keeps its copy."
+            notice = "Copying \(t.series ?? t.name ?? "the episode") to the NAS."
+                + (overview?.seedbox.removeAfterCopy == true
+                   ? " Once it is there, it is removed from the seedbox." : " The seedbox keeps its copy.")
             await refresh()
         } catch {
             notice = "Could not bring it to the NAS: \(error.localizedDescription)"

@@ -144,6 +144,54 @@ class ScoutTests(Harness):
         self.assertEqual(self.sn.taken, [])
         self.assertEqual(self.sn.searches(), [], "never a plain search for a better copy")
 
+    def test_a_copy_gone_from_the_seedbox_to_the_nas_is_still_the_one_to_beat(self):
+        # The 1080p reached the NAS and its torrent was removed: the hunt for 4K goes on,
+        # measured against it.
+        self.grab(5, T0, 500, "e" * 40, verdict="imported")
+        self.sn.has_file.add(5)
+        self.sn.releases[5] = [{"guid": "same", "indexerId": 1, "approved": True, "customFormatScore": 550},
+                               {"guid": "dv", "indexerId": 2, "approved": True, "customFormatScore": 13500}]
+        self.now[0] = T0 + 21 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [{"guid": "dv", "indexerId": 2}])
+
+    def test_a_worse_copy_is_retired_by_one_already_on_the_nas(self):
+        self.login()
+        w = make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)])
+        self.add([w])
+        hw = info_hash(w)
+        self.qb.torrents[hw].update(progress=0.4, state="downloading")
+        self.grab(5, T0 - HOUR, 13500, "e" * 40, verdict="imported")
+        self.sn.has_file.add(5)
+        self.grab(5, T0, 500, hw)
+        self.gate.poll()
+        self.scout.run_once()
+        self.assertNotIn(hw, self.qb.torrents)
+
+    def test_an_episode_the_library_lost_is_fetched_again_within_its_week(self):
+        self.grab(5, T0, 13500, "e" * 40, verdict="imported")      # on the NAS, then deleted there
+        self.sn.releases[5] = [{"guid": "dv", "indexerId": 2, "approved": True, "customFormatScore": 13500}]
+        self.now[0] = T0 + 21 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [{"guid": "dv", "indexerId": 2}])
+
+    def test_but_not_while_its_files_are_being_moved_between_season_folders(self):
+        self.sn.history.append({"episodeId": 5, "seriesId": 9, "date": iso(T0), "customFormatScore": 13500,
+                                "downloadId": ("e" * 40).upper(), "sourceTitle": "x", "customFormats": [],
+                                "data": {"downloadClientName": "Seedbox qBittorrent (via Magnet)"}})
+        self.store.decide("e" * 40, "imported", "x")
+        self.scout.placing = lambda: {9}
+        self.sn.releases[5] = [{"guid": "dv", "indexerId": 2, "approved": True, "customFormatScore": 13500}]
+        self.now[0] = T0 + 21 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [])
+
+    def test_the_week_settles_even_if_the_file_was_deleted_after_watching(self):
+        self.grab(5, T0, 13500, "e" * 40, verdict="imported")
+        self.now[0] = T0 + 7 * DAY + 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.monitor, [{"episodeIds": [5], "monitored": False}])
+
     def test_an_upgrade_downloading_beside_the_first_copy_is_not_a_slow_first_copy(self):
         self.login()
         x = make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)])

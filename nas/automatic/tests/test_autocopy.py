@@ -258,3 +258,110 @@ class ToSeasonFolders(AutoCopy):
         b = self.finished(make_torrent("Show.S01E06.1080p", [("Show.S01E06.1080p.mkv", 2 * GB)]), ep=6)
         self.api.auto_transfer()
         self.assertEqual(len(self.scans()), 1, "the second episode of the show waits its turn")
+
+
+class LeavesTheSeedbox(AutoCopy):
+    def on_nas(self, h):
+        self.sn.imports[h.upper()] = [{"date": iso(time.time()), "seriesId": 9, "episodeId": 5,
+                                       "data": {"importedPath": "/tv/Show/Season 1/x.mkv"}}]
+        self.api.check_transfers()
+
+    def test_once_on_the_nas_the_torrent_and_its_files_leave_the_seedbox(self):
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.on_nas(h)
+        self.api.retire_copied()
+        self.assertNotIn(h, self.qb.torrents)
+        form = {f["name"]: f["data"].decode() for f in self.qb.actions("/api/v2/torrents/delete")[-1][2]}
+        self.assertEqual(form, {"hashes": h, "deleteFiles": "true"})
+        self.assertEqual(self.store.decision(h)["verdict"], "imported")
+
+    def test_one_sonarr_left_out_for_an_as_good_library_copy_leaves_too(self):
+        h = self.finished(CLEAN, score=1525)
+        self.sn.has_file.add(5)
+        self.sn.episodes[5] = {"episodeFileId": 77}
+        self.sn.files[77] = {"customFormatScore": 1475}
+        self.api.auto_transfer()
+        self.api.check_transfers()
+        self.api.retire_copied()
+        self.assertNotIn(h, self.qb.torrents)
+
+    def test_not_while_copying_nor_after_a_failure(self):
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()                 # running
+        self.api.retire_copied()
+        self.assertIn(h, self.qb.torrents)
+        self.api.check_transfers()               # nothing imported, no library file: failed
+        self.api.retire_copied()
+        self.assertIn(h, self.qb.torrents, "the copy did not arrive; the seedbox's is the only one")
+
+    def test_switched_off_it_stays(self):
+        self.api.remove_after_copy = False
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.on_nas(h)
+        self.api.retire_copied()
+        self.assertIn(h, self.qb.torrents)
+
+    def test_sonarr_grabbing_it_again_does_not_download_it_again(self):
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.on_nas(h)
+        self.api.retire_copied()
+        self.sn.has_file.add(5)
+        self.assertEqual(self.add([CLEAN])[:2], (200, b"Ok."))
+        self.assertNotIn(h, self.qb.torrents)
+
+    def test_a_worse_copy_finishing_after_the_better_one_left_is_not_copied(self):
+        better = self.finished(CLEAN, score=13500)
+        self.api.auto_transfer()
+        self.on_nas(better)
+        self.api.retire_copied()
+        self.sn.has_file.add(5)
+        worse = self.finished(make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)]), score=500)
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1)
+        self.assertEqual(self.api.copy_states()[worse][0], "skipped")
+
+    def test_a_pack_sonarr_only_partly_took_stays(self):
+        self.login()
+        pack = make_torrent("Show.S01", [(f"Show.S01E0{i}.mkv", 2 * GB) for i in (5, 6)])
+        self.add([pack])
+        h = info_hash(pack)
+        self.gate.poll()
+        self.qb.torrents[h].update(progress=1.0, state="stoppedUP", amount_left=0)
+        for ep in (5, 6):
+            self.sn.history.append({"episodeId": ep, "seriesId": 9, "date": iso(time.time()), "customFormatScore": 500,
+                                    "downloadId": h.upper(), "data": {"downloadClientName": CLIENT}})
+        self.api._grabs = (0.0, {})
+        self.gate.poll()
+        self.api.auto_transfer()
+        self.on_nas(h)                           # Sonarr imported episode 5 only
+        self.api.retire_copied()
+        self.assertIn(h, self.qb.torrents, "episode 6 is only on the seedbox")
+        self.sn.has_file.add(6)                  # it reaches the library some other way
+        self.api._not_home.clear()
+        self.api.retire_copied()
+        self.assertNotIn(h, self.qb.torrents)
+
+    def test_if_the_library_lost_it_sonarr_can_download_it_again(self):
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.on_nas(h)
+        self.api.retire_copied()
+        self.assertEqual(self.add([CLEAN])[:2], (200, b"Ok."))      # episode 5 has no file now
+        self.assertIn(h, self.qb.torrents)
+
+    def test_a_torrent_added_again_is_not_removed_while_it_downloads(self):
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.on_nas(h)
+        self.qb.torrents[h].update(progress=0.3, state="downloading", amount_left=GB, added_on=int(time.time()) + 5)
+        self.gate.poll()
+        self.api.retire_copied()
+        self.assertIn(h, self.qb.torrents)
+
+    def test_the_app_is_told_whether_copies_leave_the_seedbox(self):
+        self.assertTrue(self.api.seedbox()["removeAfterCopy"])
+        self.api.remove_after_copy = False
+        self.assertFalse(self.api.seedbox()["removeAfterCopy"])

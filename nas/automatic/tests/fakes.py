@@ -207,7 +207,9 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
                 return self._json({"records": s.imports.get(params["downloadId"], [])})
             if "downloadId" in params:
                 hid = s.grabs.get(params.get("downloadId", ""))
-                return self._json({"records": [{"id": hid, "downloadId": params["downloadId"]}] if hid else []})
+                found = [{"id": hid, "downloadId": params["downloadId"]}] if hid else []
+                found += [r for r in s.history if (r.get("downloadId") or "").upper() == params["downloadId"].upper()]
+                return self._json({"records": found})
             return self._json({"records": s.history})
         if path == "/api/v3/calendar":
             return self._json(s.calendar)

@@ -211,7 +211,8 @@ Follow a show in the **Following** tab. From then on:
 3. **It downloads to your seedbox** and appears in Automatic's **Seedbox** tab (the list of
    episode downloads — not a pane in Files).
 4. **It goes into your library when it finishes.** Sonarr copies it into the show's
-   folder on the NAS; the seedbox keeps seeding.
+   folder on the NAS, and once it is there the torrent and its files are removed from
+   the seedbox.
 5. **For a week after the first copy is grabbed, it looks for better** — Dolby Vision
    first, then 4K, then HDR. A better copy replaces the file in the show's folder (the
    old one is deleted unless Sonarr's recycle bin is set) and the worse one on the
@@ -221,7 +222,7 @@ Follow a show in the **Following** tab. From then on:
 |---|---|
 | **Following** | Your shows. Search to follow another; right-click one to stop following (nothing is deleted). |
 | **Coming Up** | The last three days and next four weeks, and where each episode is. |
-| **Seedbox** | Every episode download, what made it good, and whether it is on the NAS. |
+| **Seedbox** | Each episode download until it reaches the NAS, and what made it good. |
 | **Blocked** | Releases that were refused or dropped, and why. |
 | **Suggestions** | Shows still airing that you picked in the browser or watch in Plex. |
 
@@ -247,7 +248,10 @@ Only new episodes are fetched; following a show never downloads its back catalog
   replaced.
 - **The copy to the NAS** starts once a download the gate passed has finished, best copy
   first, one per show at a time. Sonarr copies it into the show's folder and names it;
-  it counts as on the NAS only when Sonarr records the import. One Sonarr leaves out because the library's copy
+  it counts as on the NAS only when Sonarr records the import, and then the torrent and
+  its files leave the seedbox (`REMOVE_AFTER_COPY=false` keeps them). While the episode
+  is in the library, Sonarr grabbing that release again does not download it again; if
+  the library loses it within its week, it is fetched again. One Sonarr leaves out because the library's copy
   is already as good is marked so. Any other copy that does not arrive is tried again over
   about two days (Sonarr will not import an episode still titled "TBA" until two days
   after it airs), and then **Bring to NAS** appears on the Seedbox tab so you can try it

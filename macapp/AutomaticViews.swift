@@ -498,10 +498,15 @@ private struct AutoSeedboxView: View {
                 AutoHeader(title: "Seedbox", subtitle: subtitle)
                 let torrents = model.overview?.seedbox.torrents ?? []
                 if model.overview != nil && torrents.isEmpty {
-                    AutoEmpty(symbol: "arrow.down.circle", title: "Nothing downloaded yet",
-                              message: autoCopy
-                                ? "Episodes appear here as they download, and each goes to its show folder on the NAS when it finishes."
-                                : "Episodes appear here as they download. Nothing moves to the NAS until you choose Bring to NAS.")
+                    if autoCopy && model.overview?.seedbox.removeAfterCopy == true {
+                        AutoEmpty(symbol: "checkmark.circle", title: "Nothing on the seedbox",
+                                  message: "Episodes appear here while they download, and leave once they are in their show folder on the NAS.")
+                    } else {
+                        AutoEmpty(symbol: "arrow.down.circle", title: "Nothing downloaded yet",
+                                  message: autoCopy
+                                    ? "Episodes appear here as they download, and each goes to its show folder on the NAS when it finishes."
+                                    : "Episodes appear here as they download. Nothing moves to the NAS until you choose Bring to NAS.")
+                    }
                 }
                 VStack(spacing: 0) {
                     ForEach(torrents) { t in

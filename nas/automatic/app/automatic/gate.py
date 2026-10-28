@@ -32,6 +32,7 @@ import urllib.parse
 
 from . import bencode, qbstate, rules
 from .qbit import AuthRejected, UpstreamError
+from .sonarr import SonarrError
 
 # The only calls Sonarr makes, so the only calls that pass. Matched after the path is
 # percent-decoded, because qBittorrent decodes it too: "torrents/delet%65" is delete.
@@ -175,7 +176,7 @@ class Gate:
                 self.store.decide(info["hash"], "rejected", info["name"], reason, bad, "torrent-file", new_grab=True)
                 self.log(f"rejected before download: {info['name']} -- {reason}")
                 continue
-            if self._present(info["hash"]):
+            if self._present(info["hash"]) or self._imported(info["hash"]):
                 continue
             # Passing here is a first fence, not the verdict: a crafted file can read one
             # way to this parser and another to libtorrent. It goes in stopped, and the
@@ -185,7 +186,7 @@ class Gate:
         fresh = []
         for u in urls:
             h = magnet_hash(u) if u.lower().startswith("magnet:") else None
-            if h and self._present(h):
+            if h and (self._present(h) or self._imported(h)):
                 continue
             fresh.append(u)
             if h:
@@ -227,6 +228,23 @@ class Gate:
             return bool(self.qbit.get_json("/api/v2/torrents/info", {"hashes": h}))
         except (UpstreamError, ValueError):
             return False
+
+    def _imported(self, h):
+        """Already on the NAS -- and still there -- and removed from the seedbox: Sonarr
+        grabbing it again is not a reason to download it again. If the library has lost
+        the episode, it is downloaded like any other grab."""
+        d = self.store.decision(h)
+        if not d or d["verdict"] != "imported":
+            return False
+        try:
+            recs = self.sonarr.get("history", downloadId=h.upper(), eventType=1, pageSize=50)
+            recs = recs.get("records", recs) if isinstance(recs, dict) else (recs or [])
+            eps = sorted({r["episodeId"] for r in recs if r.get("episodeId")})
+            if not eps:
+                return True
+            return all(e.get("hasFile") for e in self.sonarr.get("episode", episodeIds=eps) or [])
+        except SonarrError:
+            return True
 
     def _forward_add(self, fields):
         data, ctype = encode_form(fields)

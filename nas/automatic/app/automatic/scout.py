@@ -64,6 +64,10 @@ class Scout:
         # download client, another setup -- are history, not its business: it once
         # closed the "week" of month-old grabs and unmonitored their episodes.
         self.client_name = client_name
+        # Series whose files the season-folder worker is moving: Sonarr can briefly report
+        # no file for them, which is not the same as the file being gone.
+        self.placing = lambda: set()
+        self._home = set()
         self.last_run = 0.0
         self.last_error = ""
 
@@ -102,6 +106,7 @@ class Scout:
         fresh = self.gate.last_poll and time.time() - self.gate.last_poll < 300     # the gate polls in real time
         if self.sonarr.alive():
             by_ep, by_hash = self.grabs()
+            self._home = self._still_home(by_ep)
             live = self._live(by_ep, now)
             self._first_copies(live, now)
             self._upgrades(by_ep, live, now)
@@ -112,6 +117,35 @@ class Scout:
             self._stalls(now)
         self.store.put("scout.episodes", self._state)
         self.last_run = now
+
+    def _still_home(self, by_ep):
+        """Episodes whose copy went from the seedbox to the NAS and are still in the
+        library. Such a copy is the one to beat only while it is there: an episode whose
+        file was deleted has no copy, and may be fetched again within its week."""
+        decisions = self.store.decisions()
+        imported = {}
+        for eid, recs in by_ep.items():
+            for r in recs:
+                if decisions.get((r.get("downloadId") or "").lower(), {}).get("verdict") == "imported":
+                    imported[eid] = r.get("seriesId")
+        if not imported:
+            return set()
+        placing = self.placing()
+        home = {e for e, series in imported.items() if series in placing}
+        try:
+            ids = sorted(imported)
+            for i in range(0, len(ids), 50):
+                home |= {e["id"] for e in self.sonarr.get("episode", episodeIds=ids[i:i + 50]) or []
+                         if e.get("hasFile")}
+        except SonarrError:
+            return set(imported)        # cannot tell: assume nothing was lost
+        return home
+
+    def _imported_away(self, r, eid):
+        """A grab that reached the NAS and was removed from the seedbox, but whose episode
+        is no longer in the library."""
+        d = self.store.decision((r.get("downloadId") or "").lower())
+        return bool(d) and d["verdict"] == "imported" and eid not in self._home
 
     def _live(self, by_ep, now):
         """Episode -> its grabs that are still a copy: not refused, stalled or retired.
@@ -127,7 +161,8 @@ class Scout:
                 if d and d["verdict"] in ("rejected", "stalled", "superseded"):
                     continue
                 young = now - (_ts(r.get("date")) or 0) < 600     # the gate may not have seen it yet
-                if (d and d["verdict"] in ("approved", "waiting", "held")) or h in self.gate.known or young:
+                # "imported": on the NAS and gone from the seedbox, and still the copy to beat.
+                if (d and d["verdict"] in ("approved", "waiting", "held", "imported")) or h in self.gate.known or young:
                     keep.append(r)
             if keep:
                 out[eid] = keep
@@ -170,7 +205,9 @@ class Scout:
                 continue                        # long settled; not ours to touch
             s = self._state.setdefault(str(eid), {})
             s["first"] = min(s.get("first", first), first)
-            best = max(recs, key=lambda r: r.get("customFormatScore") or 0)
+            # A copy the library has lost is no copy at all: nothing to beat.
+            present = [r for r in recs if not self._imported_away(r, eid)]
+            best = max(present, key=lambda r: r.get("customFormatScore") or 0) if present else {}
             s["best"] = best.get("customFormatScore") or 0
             s["bestTitle"] = best.get("sourceTitle", "")
             if s.get("closed"):
@@ -231,7 +268,11 @@ class Scout:
             return
         for eid in closing:
             hashes = {(r.get("downloadId") or "").lower() for r in live.get(eid, [])}
-            finished = any(qbstate.is_finished(self.gate.known[h]) for h in hashes if h in self.gate.known)
+            decisions = self.store.decisions()
+            # A copy that reached the NAS counts, even if the library no longer has it:
+            # a file deleted after watching is not a reason to keep searching.
+            finished = any((h in self.gate.known and qbstate.is_finished(self.gate.known[h]))
+                           or decisions.get(h, {}).get("verdict") == "imported" for h in hashes)
             if finished or has_file.get(eid):
                 done.append(eid)
             else:
@@ -258,15 +299,18 @@ class Scout:
             if t["status"] == "done":
                 landed[t["hash"]] = max(landed.get(t["hash"], 0), t["updated"])
         mine = {h: t for h, t in self.gate.known.items() if decisions.get(h, {}).get("verdict") == "approved"}
+        # A copy already on the NAS has left the seedbox, but it is still the one to beat.
+        imported = {h for h, d in decisions.items() if d["verdict"] == "imported"
+                    and all(r.get("episodeId") in self._home for r in by_hash.get(h, []))}
         cover = {}                              # hash -> (score, episode ids)
-        for h in mine:
+        for h in set(mine) | imported:
             recs = by_hash.get(h, [])
             if recs:
                 cover[h] = (max(r.get("customFormatScore") or 0 for r in recs), {r["episodeId"] for r in recs})
         # Finished the way qBittorrent shows it: every byte, and no check running.
-        complete = {h for h, t in mine.items() if qbstate.is_finished(t)}
+        complete = {h for h, t in mine.items() if qbstate.is_finished(t)} | (imported & set(cover))
         for h, (score, eps) in cover.items():
-            if h in running or not eps:
+            if h not in mine or h in running or not eps:
                 continue
             # Beaten by a better finished copy -- or equalled by one that reached the NAS
             # after it, which is the copy the library now holds.
