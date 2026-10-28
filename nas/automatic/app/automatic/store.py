@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS transfers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hash TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL,             -- queued | running | done | failed
+    status TEXT NOT NULL,             -- running | done | skipped | failed
     command_id INTEGER,
     message TEXT NOT NULL DEFAULT '',
     created REAL NOT NULL,
@@ -106,6 +106,12 @@ class Store:
         now = time.time()
         return self._exec("INSERT INTO transfers (hash, name, status, command_id, created, updated)"
                           " VALUES (?,?,?,?,?,?)", (h.lower(), name, "running", command_id, now, now))
+
+    def fail_transfer(self, h, name, message):
+        """A copy that could not even be started, recorded so it is not retried at once."""
+        now = time.time()
+        return self._exec("INSERT INTO transfers (hash, name, status, command_id, message, created, updated)"
+                          " VALUES (?,?,?,?,?,?,?)", (h.lower(), name, "failed", None, message, now, now))
 
     def update_transfer(self, tid, status, message=""):
         self._exec("UPDATE transfers SET status=?, message=?, updated=? WHERE id=?", (status, message, time.time(), tid))

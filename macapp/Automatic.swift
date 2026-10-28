@@ -82,6 +82,11 @@ struct AutoTorrent: Codable, Hashable, Identifiable {
     let progressText: String?
     let finished: Bool?
     let checking: Bool?
+    /// The copy to the NAS, for a finished episode: waiting (the NAS copies it by
+    /// itself), running, done, skipped (Sonarr kept the library's copy), or failed (the
+    /// automatic copy gave up). Older NAS versions do not say.
+    let copyStatus: String?
+    let copyMessage: String?
 
     var id: String { hash }
     var lookingUntil: Date? { betterUntil.flatMap(AutoDate.parse) }
@@ -89,13 +94,20 @@ struct AutoTorrent: Codable, Hashable, Identifiable {
     /// Finished the way qBittorrent shows it: every byte there and no check running.
     /// Older NAS versions do not say, so fall back to the progress figure.
     var isComplete: Bool { finished ?? ((progress ?? 0) >= 1) }
-    var canBringToNAS: Bool { verdict == "approved" && isComplete && checking != true && !transferring && !onNAS }
+    /// Only where pressing it does something the NAS will not do by itself: when the
+    /// automatic copy has given up, or on a NAS that never copies by itself.
+    var canBringToNAS: Bool {
+        verdict == "approved" && isComplete && checking != true && !transferring && !onNAS
+            && (copyStatus == nil || copyStatus == "failed")
+    }
 }
 
 struct AutoSeedbox: Codable, Hashable {
     let torrents: [AutoTorrent]
     let freeBytes: Int64?
     let minFreeBytes: Int64?
+    /// Whether the NAS copies finished episodes by itself.
+    let autoCopy: Bool?
 }
 
 struct AutoBlocked: Codable, Hashable, Identifiable {

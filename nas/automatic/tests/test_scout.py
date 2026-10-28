@@ -60,17 +60,32 @@ class ScoutTests(Harness):
         self.assertFalse(any(e in (1, 2, 3) for s in self.sn.searches() for e in s))
 
     # -- a week of looking for better ------------------------------------------------
+    def test_upgrade_pace(self):
+        # A better copy usually follows within hours: close at first, then easing off.
+        self.grab(5, T0, 500, title="Show.S01E05.1080p.WEB")
+        expected = 0
+        for at, searched, why in ((10 * 60, False, "the first copy is ten minutes old"),
+                                  (21 * 60, True, "twenty minutes on"),
+                                  (31 * 60, False, "every 20 minutes for the first six hours"),
+                                  (42 * 60, True, "twenty minutes after the last"),
+                                  (7 * HOUR, True, "seven hours on: hourly now"),
+                                  (7 * HOUR + 30 * 60, False, "not every half hour after six hours"),
+                                  (8 * HOUR + 60, True, "an hour after the last"),
+                                  (2 * DAY + 60, True, "two days on"),
+                                  (2 * DAY + 2 * HOUR, False, "every six hours after two days"),
+                                  (2 * DAY + 6 * HOUR + 120, True, "six hours after the last")):
+            self.now[0] = T0 + at
+            self.scout.run_once()
+            expected += searched
+            self.assertEqual(len(self.sn.searches()), expected, why)
+
+    def test_the_pace_never_runs_slower_than_the_setting(self):
+        scout = Scout(self.gate, self.sonarr, self.store, log=lambda m: None, upgrade_every_hours=0.25)
+        self.assertEqual(scout.upgrade_interval(HOUR), 15 * 60)
+        self.assertEqual(scout.upgrade_interval(3 * DAY), 15 * 60)
+
     def test_upgrade_window(self):
         self.grab(5, T0, 3500, title="Show.S01E05.2160p.WEB-DL.HDR")
-        self.tick(HOUR)
-        self.scout.run_once()
-        self.assertEqual(self.sn.searches(), [], "the first copy is minutes old")
-        self.tick(6 * HOUR)
-        self.scout.run_once()
-        self.assertEqual(self.sn.searches(), [[5]])
-        self.tick(HOUR)
-        self.scout.run_once()
-        self.assertEqual(len(self.sn.searches()), 1, "every six hours, not every pass")
         self.tick(7 * DAY)
         self.scout.run_once()
         self.assertEqual(self.sn.monitor, [], "the week is over, but no copy has finished: keep at it")
@@ -83,6 +98,78 @@ class ScoutTests(Harness):
         self.scout.run_once()
         self.assertEqual(len(self.sn.searches()), n, "nothing more after it settles")
         self.assertEqual(self.scout.status()["settled"], 1)
+
+    # -- a better copy while the first is still on its way -------------------------------
+    def _finished_first_copy(self, score=500):
+        self.login()
+        t = make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)])
+        self.add([t])
+        h = info_hash(t)
+        self.qb.torrents[h].update(progress=1.0, state="stoppedUP", amount_left=0)
+        self.grab(5, T0, score, h)
+        self.gate.poll()
+        return h
+
+    def test_a_copy_waiting_for_the_library_is_replaced_only_by_a_better_one(self):
+        self._finished_first_copy(score=500)
+        self.sn.releases[5] = [
+            {"guid": "same", "indexerId": 1, "approved": True, "customFormatScore": 500, "title": "the copy here"},
+            {"guid": "barely", "indexerId": 1, "approved": True, "customFormatScore": 550, "title": "not by enough"},
+            {"guid": "dv", "indexerId": 2, "approved": True, "customFormatScore": 13500, "title": "2160p DV"},
+            {"guid": "refused", "indexerId": 3, "approved": False, "customFormatScore": 20000, "title": "blocklisted"}]
+        self.now[0] = T0 + 21 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [{"guid": "dv", "indexerId": 2}])
+        self.assertEqual(self.sn.searches(), [], "a plain search would take the copy already here")
+
+    def test_nothing_better_takes_nothing(self):
+        self._finished_first_copy(score=500)
+        self.sn.releases[5] = [{"guid": "same", "indexerId": 1, "approved": True, "customFormatScore": 500}]
+        self.now[0] = T0 + 21 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [])
+        self.now[0] = T0 + 32 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.taken, [], "and it still keeps to the pace")
+
+    def test_once_in_the_library_sonarr_compares_for_itself(self):
+        self._finished_first_copy(score=500)
+        self.sn.has_file.add(5)
+        self.now[0] = T0 + 21 * 60
+        self.scout.run_once()
+        self.assertEqual(self.sn.searches(), [[5]])
+        self.assertEqual(self.sn.taken, [])
+
+    def test_an_upgrade_downloading_beside_the_first_copy_is_not_a_slow_first_copy(self):
+        self.login()
+        x = make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)])
+        y = make_torrent("Show.S01E05.2160p.DV", [("Show.S01E05.2160p.DV.mkv", 9 * GB)])
+        self.add([x, y])
+        hx, hy = info_hash(x), info_hash(y)
+        self.qb.torrents[hx].update(progress=0.5, state="downloading", eta=2 * 3600)
+        self.qb.torrents[hy].update(progress=0.1, state="downloading", eta=6 * 3600)
+        self.grab(5, T0 - 21 * 60, 500, hx)
+        self.grab(5, T0, 13500, hy)
+        self.gate.poll()
+        self.scout.run_once()
+        self.tick(31 * 60)
+        self.gate.poll()
+        self.scout.run_once()
+        self.assertIn(hy, self.qb.torrents, "the 4K copy found 20 minutes in may take its time")
+
+    def test_a_slow_first_copy_is_still_replaced(self):
+        self.login()
+        x = make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)])
+        self.add([x])
+        hx = info_hash(x)
+        self.qb.torrents[hx].update(progress=0.1, state="downloading", eta=9 * 3600)
+        self.grab(5, T0, 500, hx)
+        self.gate.poll()
+        self.scout.run_once()
+        self.tick(31 * 60)
+        self.gate.poll()
+        self.scout.run_once()
+        self.assertNotIn(hx, self.qb.torrents)
 
     # -- superseded copies -------------------------------------------------------------
     def _two_copies(self, better_done=True):

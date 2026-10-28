@@ -49,6 +49,16 @@ class Sonarr:
     def get(self, path, **params):
         return self.call("GET", path, params or None)
 
+    def min_upgrade(self, profile="Magnet"):
+        """How much better, in custom-format score, a release must be to replace a copy:
+        the profile's minimum upgrade (Sonarr's own rule), never less than 1."""
+        if getattr(self, "_min_upgrade", None) is None:
+            found = next((p for p in self.get("qualityprofile") or [] if p.get("name") == profile), None)
+            if found is None:
+                return 1
+            self._min_upgrade = max(1, int(found.get("minUpgradeFormatScore") or 1))
+        return self._min_upgrade
+
     def alive(self):
         """A fast probe. A container frozen by stream-guard accepts the connection and never answers."""
         try:

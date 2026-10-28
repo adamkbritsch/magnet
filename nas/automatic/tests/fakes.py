@@ -170,6 +170,12 @@ class FakeSonarr(_Server):
         self.monitor = []     # bodies PUT to /episode/monitor
         self.has_file = set() # episode ids with a file in the library
         self.unmonitored = set()
+        self.imports = {}     # downloadId (upper) -> import records, as /history?eventType=3 returns them
+        self.episodes = {}    # episode id -> extra fields /episode returns (seriesId, numbers, title, episodeFileId)
+        self.files = {}       # episode file id -> /episodefile/{id}
+        self.releases = {}    # episode id -> what an interactive search (/release) finds
+        self.taken = []       # bodies POSTed to /release
+        self.profiles = [{"name": "Magnet", "minUpgradeFormatScore": 100}]
         self.alive = True
         super().__init__(_SonarrHandler)
 
@@ -196,6 +202,8 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
         if not s.alive:
             return self._json({}, 503)
         if path == "/api/v3/history":
+            if "downloadId" in params and params.get("eventType") == "3":
+                return self._json({"records": s.imports.get(params["downloadId"], [])})
             if "downloadId" in params:
                 hid = s.grabs.get(params.get("downloadId", ""))
                 return self._json({"records": [{"id": hid, "downloadId": params["downloadId"]}] if hid else []})
@@ -204,7 +212,14 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
             return self._json(s.calendar)
         if path == "/api/v3/episode":
             ids = [int(v) for k, v in urllib.parse.parse_qsl(query) if k == "episodeIds"]
-            return self._json([{"id": i, "hasFile": i in s.has_file, "monitored": i not in s.unmonitored} for i in ids])
+            return self._json([dict(s.episodes.get(i, {}), id=i, hasFile=i in s.has_file, monitored=i not in s.unmonitored)
+                               for i in ids])
+        if path == "/api/v3/release":
+            return self._json(s.releases.get(int(params.get("episodeId", 0)), []))
+        if path == "/api/v3/qualityprofile":
+            return self._json(s.profiles)
+        if path.startswith("/api/v3/episodefile/"):
+            return self._json(s.files.get(int(path.rsplit("/", 1)[1]), {}))
         if path == "/api/v3/system/status":
             return self._json({"version": "4.0.19"})
         if path == "/api/v3/queue":
@@ -227,6 +242,9 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(n) or b"{}") if n else {}
         if self.path.startswith("/api/v3/history/failed/"):
             s.failed.append(int(self.path.rsplit("/", 1)[1]))
+            return self._json({})
+        if self.path == "/api/v3/release":
+            s.taken.append(body)
             return self._json({})
         if self.path == "/api/v3/command":
             s.commands.append(body)

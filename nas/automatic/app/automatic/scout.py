@@ -5,10 +5,15 @@ RSS misses and what Sonarr will not do by itself:
 
 * As soon as an episode has aired and nothing has been grabbed, it asks Sonarr to
   search for it -- every 20 minutes for the first six hours, then every two hours.
-* Once a copy is grabbed, the episode has a week. Every six hours the scout asks
-  Sonarr to search again; Sonarr takes a release only if it beats what is already
-  queued by the profile's minimum upgrade (Dolby Vision first, every time). After the
-  week the episode is unmonitored, so nothing changes it again.
+* Once a copy is grabbed, the episode has a week to find a better one. A 4K or Dolby
+  Vision release usually follows the first copy within hours, so the scout asks Sonarr
+  to search again every 20 minutes for the first six hours, then every hour until two
+  days have passed, then every six hours for the rest of the week. Sonarr takes a
+  release only if it beats the copy it has by the profile's minimum upgrade (Dolby
+  Vision first, every time). While a finished copy is still on its way into the
+  library, Sonarr has nothing to compare with, so the scout reads the search results
+  itself and takes only a release that beats that copy. After the week the episode is
+  unmonitored, so nothing changes it again.
 * A download that stops moving -- no progress for three hours, or a magnet whose file
   list never arrives in two -- is dropped and marked failed, and Sonarr takes the next
   best release.
@@ -59,6 +64,16 @@ class Scout:
         self.client_name = client_name
         self.last_run = 0.0
         self.last_error = ""
+
+    # How often to look for better, by the age of the first copy: (younger than, every).
+    # Past the last step it is `upgrade_every`.
+    UPGRADE_PACE = ((6 * 3600, 20 * 60), (2 * DAY, 3600))
+
+    def upgrade_interval(self, age):
+        for within, every in self.UPGRADE_PACE:
+            if age < within:
+                return min(every, self.upgrade_every)
+        return self.upgrade_every
 
     # -- what Sonarr knows -------------------------------------------------------
     def grabs(self):
@@ -160,19 +175,58 @@ class Scout:
                 continue
             if now - s["first"] >= self.window:
                 closing.append(eid)
-            elif now - s.get("lastSearch", s["first"]) >= self.upgrade_every:
+            elif now - s.get("lastSearch", s["first"]) >= self.upgrade_interval(now - s["first"]):
                 due.append(eid)
+        waiting = []
         if due:
             # An unfollowed show is not upgraded: Sonarr's searches started from here
             # count as asked for by hand, which skips its own monitored check.
             try:
-                watched = {e["id"] for e in self.sonarr.get("episode", episodeIds=due) or [] if e.get("monitored")}
+                eps = {e["id"]: e for e in self.sonarr.get("episode", episodeIds=due) or []}
             except SonarrError:
-                watched = set()
-            due = [e for e in due if e in watched]
+                eps = {}
+            due = [e for e in due if eps.get(e, {}).get("monitored")]
+            # A copy that has finished but is not in the library yet leaves Sonarr with
+            # nothing to compare against -- no file, and a finished download drops out
+            # of its queue -- so a plain search would take whatever ranks first, usually
+            # the very copy that is here. Those are searched here instead.
+            waiting = [e for e in due if not eps[e].get("hasFile") and self._copy_finished(live.get(e, []))]
+            due = [e for e in due if e not in waiting]
         self._search(due, "looking for a better copy")
+        for eid in waiting:
+            self._grab_better(eid, self._state[str(eid)].get("best", 0))
         if closing:
             self._close(closing, live)
+
+    def _copy_finished(self, recs):
+        hashes = {(r.get("downloadId") or "").lower() for r in recs}
+        return any(h in self.gate.known and qbstate.is_finished(self.gate.known[h]) for h in hashes)
+
+    def _grab_better(self, eid, best):
+        """Search, and take a release only if it beats `best` by the profile's minimum
+        upgrade -- what Sonarr itself would demand of a copy in the library."""
+        s = self._state.setdefault(str(eid), {})
+        s["lastSearch"] = self.now()
+        s["searches"] = s.get("searches", 0) + 1
+        self.store.put("scout.episodes", self._state)
+        try:
+            found = self.sonarr.call("GET", "release", {"episodeId": eid}, timeout=180) or []
+            need = best + self.sonarr.min_upgrade()
+        except SonarrError as e:
+            self.log(f"scout: could not search for a better copy of episode {eid}: {e}")
+            return
+        better = [r for r in found if r.get("approved") and (r.get("customFormatScore") or 0) >= need]
+        if not better:
+            return
+        pick = max(better, key=lambda r: (r.get("customFormatScore") or 0, r.get("seeders") or 0))
+        try:
+            self.sonarr.call("POST", "release", body={"guid": pick["guid"], "indexerId": pick["indexerId"]},
+                             timeout=60)
+        except SonarrError as e:
+            self.log(f"scout: could not take {pick.get('title')}: {e}")
+            return
+        self.log(f"scout: took {pick.get('title')} (score {pick.get('customFormatScore')}) for episode {eid}"
+                 f" -- better than the copy on its way to the library (score {best})")
 
     def _close(self, closing, live):
         """The week is over. Only an episode that really has a copy -- finished on the
@@ -254,6 +308,14 @@ class Scout:
             others = {(r.get("downloadId") or "").lower() for e in eps for r in live.get(e, [])} - {h}
             if any(o in self.gate.known and qbstate.is_finished(self.gate.known[o]) for o in others):
                 continue                    # not the first copy: an upgrade may take its time
+            # Nor when an earlier copy is still on its way: this one is the upgrade the
+            # search found meanwhile (the first days are searched every 20 minutes), and
+            # an upgrade may take its time too. If that earlier copy fails, this becomes
+            # the first copy and is judged as one.
+            mine = min((_ts(r.get("date")) or now) for r in by_hash.get(h, []))
+            if any((r.get("downloadId") or "").lower() != h and (_ts(r.get("date")) or now) < mine
+                   for e in eps for r in live.get(e, [])):
+                continue
             try:
                 if any(e.get("hasFile") for e in self.sonarr.get("episode", episodeIds=sorted(eps)) or []):
                     continue

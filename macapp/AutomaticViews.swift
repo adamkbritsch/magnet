@@ -499,7 +499,9 @@ private struct AutoSeedboxView: View {
                 let torrents = model.overview?.seedbox.torrents ?? []
                 if model.overview != nil && torrents.isEmpty {
                     AutoEmpty(symbol: "arrow.down.circle", title: "Nothing downloaded yet",
-                              message: "Episodes appear here as they download. Nothing moves to the NAS until you choose Bring to NAS.")
+                              message: autoCopy
+                                ? "Episodes appear here as they download, and each goes to its show folder on the NAS when it finishes."
+                                : "Episodes appear here as they download. Nothing moves to the NAS until you choose Bring to NAS.")
                 }
                 VStack(spacing: 0) {
                     ForEach(torrents) { t in
@@ -512,16 +514,22 @@ private struct AutoSeedboxView: View {
         }
     }
 
+    private var autoCopy: Bool { model.overview?.seedbox.autoCopy == true }
+
     private var subtitle: String {
         let days = model.overview?.scout?.windowDays ?? 7
-        var s = "The first copy of each episode downloads as soon as one exists; for the next \(days) days a better one replaces it, Dolby Vision first. Bring an episode to the NAS when you want it in Plex."
+        var s = autoCopy
+            ? "The first copy of each episode downloads as soon as one exists and goes to its show folder on the NAS; for the next \(days) days a better one replaces it, Dolby Vision first."
+            : "The first copy of each episode downloads as soon as one exists; for the next \(days) days a better one replaces it, Dolby Vision first. Bring an episode to the NAS when you want it in Plex."
         if let free = model.overview?.seedbox.freeBytes { s += " \(AutoFormat.bytes(free)) free on the seedbox." }
         return s
     }
 
     private func lastFailure(_ t: AutoTorrent) -> String? {
         guard let tr = model.overview?.transfers.first(where: { $0.hash == t.hash }), tr.status == "failed" else { return nil }
-        return tr.message.isEmpty ? "The copy to the NAS failed." : tr.message
+        let message = tr.message.isEmpty ? "The copy to the NAS failed." : tr.message
+        // Still the NAS's to retry: say so, so the missing button reads as patience.
+        return t.copyStatus == "waiting" ? "\(message) Magnet tries again by itself." : message
     }
 }
 
@@ -588,6 +596,13 @@ private struct AutoTorrentRow: View {
             else if t.transferring { AutoChip(text: "Copying to the NAS", tint: Tint.busy, symbol: "arrow.right") }
             else if t.checking == true {
                 AutoChip(text: t.progressText ?? "Checking", tint: Tint.check, symbol: "checkmark.circle.badge.questionmark")
+            }
+            else if t.isComplete && t.copyStatus == "waiting" {
+                AutoChip(text: failure == nil ? "Copying soon" : "Will try again", tint: Tint.busy, symbol: "clock")
+            }
+            else if t.isComplete && t.copyStatus == "skipped" {
+                AutoChip(text: "Library copy kept", tint: .secondary, symbol: "checkmark")
+                    .help(t.copyMessage ?? "")
             }
             else if t.isComplete { AutoChip(text: "Ready", tint: Tint.ok, symbol: "tray.full") }
             else { downloadingChip }

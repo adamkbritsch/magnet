@@ -54,9 +54,10 @@ needs neither; the file downloader and automatic TV use both.
 - **It never takes a fake, and keeps the best.** A release with a program in it instead of
   a video is refused. Dolby Vision, 4K and HDR are preferred, in that order; a lesser copy
   can be the first one when nothing better exists yet.
-- **It keeps looking for a better copy** for a week after the first one is grabbed.
-- **Nothing reaches your NAS until you say so:** one click on **Bring to NAS** copies an
-  episode into your library.
+- **It keeps looking for a better copy** for a week after the first one is grabbed, most
+  closely in the first two days, when 4K and Dolby Vision releases usually appear.
+- **Each episode goes into your library by itself** as soon as it finishes downloading,
+  and a better copy found later replaces it.
 
 ## What you need
 
@@ -209,16 +210,18 @@ Follow a show in the **Following** tab. From then on:
    episode-size video, or a sample beside an archive is refused, and the next best is tried.
 3. **It downloads to your seedbox** and appears in Automatic's **Seedbox** tab (the list of
    episode downloads — not a pane in Files).
-4. **For a week after the first copy is grabbed, it looks for better** — Dolby Vision
-   first, then 4K, then HDR — and a better copy replaces the worse one on the seedbox.
-5. **You press Bring to NAS** when you want it in your library. Sonarr copies it into the
-   show's folder; the seedbox keeps seeding.
+4. **It goes into your library when it finishes.** Sonarr copies it into the show's
+   folder on the NAS; the seedbox keeps seeding.
+5. **For a week after the first copy is grabbed, it looks for better** — Dolby Vision
+   first, then 4K, then HDR. A better copy replaces the file in the show's folder (the
+   old one is deleted unless Sonarr's recycle bin is set) and the worse one on the
+   seedbox.
 
 | Tab | Shows |
 |---|---|
 | **Following** | Your shows. Search to follow another; right-click one to stop following (nothing is deleted). |
 | **Coming Up** | The last three days and next four weeks, and where each episode is. |
-| **Seedbox** | Every episode download, what made it good, and **Bring to NAS**. |
+| **Seedbox** | Every episode download, what made it good, and whether it is on the NAS. |
 | **Blocked** | Releases that were refused or dropped, and why. |
 | **Suggestions** | Shows still airing that you picked in the browser or watch in Plex. |
 
@@ -235,9 +238,20 @@ Only new episodes are fetched; following a show never downloads its back catalog
   holds new releases while the seedbox has less than 100 GB free.
 - **The scout** is the part that decides when Sonarr searches: every 20 minutes for the
   first six hours after an episode airs, then every two hours until two days after it
-  aired. Once a copy is grabbed, it asks every six hours for a week for a better one. A
-  download that stops moving for three hours, or a first copy too slow to finish, is
-  replaced.
+  aired. Once a copy is grabbed, it looks for a better one for a week: every 20 minutes
+  for the first six hours, hourly until two days have passed, then every six hours. A
+  release is taken only if it beats the copy there is by the profile's minimum upgrade
+  — Sonarr checks that against the library's file, and Magnet checks it itself while a
+  finished copy is still on its way in. A download that stops moving for three hours, or
+  a first copy too slow to finish, is replaced.
+- **The copy to the NAS** starts once a download the gate passed has finished, best copy
+  first. Sonarr copies it into the show's folder and names it; it counts as on the NAS
+  only when Sonarr records the import. One Sonarr leaves out because the library's copy
+  is already as good is marked so. Any other copy that does not arrive is tried again over
+  about two days (Sonarr will not import an episode still titled "TBA" until two days
+  after it airs), and then **Bring to NAS** appears on the Seedbox tab so you can try it
+  yourself. Set `AUTO_COPY=false` in `site.env` to leave every episode on the seedbox
+  until you press **Bring to NAS**.
 - **Your site bar decides where it searches** (once Prowlarr is set up — see below). The
   sites in the bar are matched to Prowlarr's indexers for them and tagged, and Prowlarr
   gives Sonarr exactly those; if none of them can search for TV, Sonarr keeps every indexer
@@ -250,14 +264,14 @@ Only new episodes are fetched; following a show never downloads its back catalog
   language are refused; nothing below 720p is taken, and a suspiciously small "4K" is
   ignored.
 - **It reads qBittorrent the way its window does.** Only a finished copy (every byte, no
-  check running) can be brought home; a torrent that stops after a check is restarted; one
+  check running) is copied to the NAS; a torrent that stops after a check is restarted; one
   that errors is rechecked; checking or moving is never mistaken for being stuck.
 
 ### Set it up
 
 Before you start: Sonarr running in Docker on the NAS (and Prowlarr, if you want your site
 bar to decide where it searches), and your seedbox's download folder mounted into Sonarr's
-container at `/seedbox/downloads/` — that is where **Bring to NAS** copies from.
+container at `/seedbox/downloads/` — that is where episodes are copied to the NAS from.
 
 1. In `local.env`, add `MAGNET_NAS_SSH` (your ssh login for the NAS) and `MAGNET_NAS_DIR`
    (the folder on the NAS to install the service into). Copy
@@ -269,8 +283,8 @@ container at `/seedbox/downloads/` — that is where **Bring to NAS** copies fro
    which hands the service your qBittorrent sign-in so it can pass downloads on.
 4. On the NAS, in that folder: `python3 setup_sonarr.py --plan` to see what it will change,
    then the same without `--plan`. It points Sonarr at the gate (turning off Sonarr's other
-   torrent clients and its automatic importing, so episodes reach the NAS only through
-   Bring to NAS), sets up the scoring, switches to new episodes only, and moves the shows
+   torrent clients and its own importing, so episodes reach the NAS only through Magnet's
+   copy, which checks the files again first), sets up the scoring, switches to new episodes only, and moves the shows
    Sonarr already follows that are still airing onto Magnet's profile. It snapshots what it
    changes and prints the snapshot's path; `python3 rollback_sonarr.py <that file>` puts it
    back, leaving Magnet's scoring and gate in Sonarr, unused.

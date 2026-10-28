@@ -5,9 +5,11 @@ for NEW episodes, and a back catalogue appearing in an RSS feed must never turn 
 a season of surprise downloads. Unfollowing only stops monitoring; nothing on disk
 is ever touched from here.
 
-Bring to NAS is a button, never automatic -- episodes move from the seedbox to the
-NAS when you decide. Sonarr does the copy (Copy, not Move, so the seedbox keeps
-its copy) and names the file into the right show folder.
+An episode that passed the gate is copied to the NAS as soon as it finishes on the
+seedbox. Sonarr does the copy (Copy, not Move, so the seedbox keeps its copy) and
+names the file into the right show folder; a better copy found later replaces the
+file, and one that is not better is left out. Bring to NAS is the same copy by hand,
+for when the automatic one has given up.
 """
 
 import datetime as dt
@@ -15,6 +17,7 @@ import hmac
 import http.server
 import json
 import re
+import threading
 import time
 import traceback
 import urllib.parse
@@ -33,13 +36,28 @@ def _norm(title):
     return re.sub(r"[^a-z0-9]+", "", title.replace("&", "and"))
 
 
+def _ts(iso):
+    try:
+        return dt.datetime.fromisoformat((iso or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _iso(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z") if ts and ts > 0 else None
 
 
 class API:
+    # How long the automatic copy waits after each failed try; after the last, the
+    # episode is left to the Bring to NAS button. About two days in all, because
+    # Sonarr refuses an episode still titled "TBA" for two days after it airs.
+    AUTO_RETRY_DELAYS = (15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 24 * 3600)
+
     def __init__(self, gate, sonarr, store, token, path_map, plex=None, watched_days=30, log=print, sources=None,
-                 scout=None):
+                 scout=None, auto_copy=True):
+        self.auto_copy = auto_copy
+        self._transfer_lock = threading.Lock()
+        self._episodes = {}       # episode id -> (when, episode record), for naming seedbox rows
         self.sources = sources    # SourceSync, or None when Prowlarr is not configured
         self.scout = scout        # Scout, or None in tests
         self._grabs = (0.0, {})   # (when, hash -> grab records), cached briefly
@@ -91,11 +109,12 @@ class API:
         # stream-guard freezes Sonarr (docker pause) while Plex is streaming, and a
         # frozen container accepts connections and then never answers. Each part is
         # fetched on its own so the seedbox view still works while Sonarr is frozen.
-        following, upcoming, sonarr_error = [], [], ""
+        following, upcoming, sonarr_error, titles = [], [], "", {}
         try:
             if not self.sonarr.alive():
                 raise SonarrError("Sonarr is not answering")
             series = self.sonarr.get("series")
+            titles = {s.get("id"): s.get("title") for s in series}
             following = [self._show(s) for s in series if s.get("monitored") and s.get("status") != "ended"]
             following.sort(key=lambda s: (s["nextAiring"] is None, s["nextAiring"] or "", s["title"].lower()))
             now = dt.datetime.now(dt.timezone.utc)
@@ -110,12 +129,12 @@ class API:
             sonarr_error = str(e)
         health = self.health(sonarr_error or None)
         return {"version": VERSION, "following": following, "upcoming": upcoming,
-                "seedbox": self.seedbox(sonarr_up=not sonarr_error), "blocked": self.blocked(),
+                "seedbox": self.seedbox(sonarr_up=not sonarr_error, titles=titles), "blocked": self.blocked(),
                 "transfers": self.store.transfers(30), "health": health,
                 "sources": self.sources.status() if self.sources else None,
                 "scout": self.scout.status() if self.scout else None}
 
-    def seedbox(self, sonarr_up=True):
+    def seedbox(self, sonarr_up=True, titles=None):
         queue = {}
         try:
             if sonarr_up:
@@ -129,12 +148,19 @@ class API:
         decisions = self.store.decisions()
         running = {t["hash"] for t in self.store.running_transfers()}
         done = {t["hash"] for t in self.store.transfers(500) if t["status"] == "done"}
+        copies = self.copy_states(decisions, grabs if sonarr_up else None)
+        # A finished download leaves Sonarr's queue, so its episode is named from the
+        # grab instead -- otherwise the row shows only the torrent's own name.
+        named = self._name_episodes(grabs, titles) if sonarr_up else {}
         out = []
         for h, t in sorted(self.gate.known.items(), key=lambda kv: -kv[1].get("added_on", 0)):
             d = decisions.get(h, {})
             r = queue.get(h, {})
-            ep = r.get("episode") or {}
             recs = grabs.get(h, [])
+            ep = r.get("episode") or {}
+            series_title = (r.get("series") or {}).get("title")
+            if not ep and h in named:
+                series_title, ep = named[h]
             score = max((g.get("customFormatScore") or 0) for g in recs) if recs else r.get("customFormatScore")
             formats = sorted({f["name"].removeprefix("Magnet: ") for g in recs for f in (g.get("customFormats") or [])}
                              | {f["name"].removeprefix("Magnet: ") for f in (r.get("customFormats") or [])})
@@ -145,11 +171,38 @@ class API:
                         "size": t.get("size") or t.get("total_size"), "dlspeed": t.get("dlspeed", 0),
                         "eta": t.get("eta"), "addedOn": _iso(t.get("added_on")), "completedOn": _iso(t.get("completion_on")),
                         "verdict": d.get("verdict", "held"), "reason": d.get("reason", ""),
-                        "series": (r.get("series") or {}).get("title"), "season": ep.get("seasonNumber"),
+                        "series": series_title, "season": ep.get("seasonNumber"),
                         "episode": ep.get("episodeNumber"), "episodeTitle": ep.get("title"),
                         "transferring": h in running, "onNAS": h in done,
+                        "copyStatus": copies.get(h, (None, ""))[0], "copyMessage": copies.get(h, (None, ""))[1],
                         "score": score, "formats": formats, "betterUntil": _iso(ends)})
-        return {"torrents": out, "freeBytes": self.gate.free_bytes, "minFreeBytes": self.gate.min_free}
+        return {"torrents": out, "freeBytes": self.gate.free_bytes, "minFreeBytes": self.gate.min_free,
+                "autoCopy": self.auto_copy}
+
+    def _name_episodes(self, grabs, titles):
+        """Torrent hash -> (series title, episode) for the torrents on the seedbox, from
+        the episodes Sonarr grabbed them for. A pack names its season, not one episode."""
+        wanted = {h: {g["episodeId"] for g in grabs.get(h, []) if g.get("episodeId")} for h in self.gate.known}
+        now = time.time()
+        missing = sorted({e for eps in wanted.values() for e in eps
+                          if now - self._episodes.get(e, (0, None))[0] > 3600})
+        try:
+            for i in range(0, len(missing), 50):
+                for e in self.sonarr.get("episode", episodeIds=missing[i:i + 50]) or []:
+                    self._episodes[e["id"]] = (now, e)
+        except SonarrError:
+            pass
+        out = {}
+        for h, eps in wanted.items():
+            found = [self._episodes[e][1] for e in eps if e in self._episodes]
+            if not found:
+                continue
+            first = min(found, key=lambda e: (e.get("seasonNumber") or 0, e.get("episodeNumber") or 0))
+            series = (titles or {}).get(first.get("seriesId"))
+            if len(found) > 1:
+                first = {"seasonNumber": first.get("seasonNumber")}
+            out[h] = (series, first)
+        return out
 
     def _grabs_by_hash(self):
         when, cached = self._grabs
@@ -327,6 +380,11 @@ class API:
 
     # -- transfers ---------------------------------------------------------------
     def transfer(self, h):
+        # By hand and by itself at the same moment must not start two copies.
+        with self._transfer_lock:
+            return self._transfer(h)
+
+    def _transfer(self, h):
         h = h.lower()
         t = self.gate.known.get(h)
         if not t:
@@ -356,20 +414,150 @@ class API:
         self.store.event("transfer", h, f"{t['name']}: copying to the NAS")
         return {"id": tid, "commandId": cmd["id"]}
 
+    def check_transfers(self):
+        for tr in self.store.running_transfers():
+            try:
+                c = self.sonarr.command(tr["command_id"])
+            except SonarrError:
+                continue
+            if c.get("status") == "completed":
+                # "Completed" is the scan finishing, not the file arriving: Sonarr also
+                # completes when it decides the file is not wanted. Only an import
+                # recorded against this download counts as on the NAS.
+                try:
+                    imported = self._imported(tr["hash"], tr["created"])
+                except SonarrError:
+                    continue
+                if imported:
+                    self.store.update_transfer(tr["id"], "done", imported)
+                    self.store.event("transferred", tr["hash"], f"{tr['name']}: on the NAS")
+                    continue
+                # Nothing arrived. Kept only when the library really has this episode at
+                # least as good; anything else is a failure, and is tried again.
+                try:
+                    status, why = self._why_not_imported(tr["hash"])
+                except SonarrError:
+                    continue
+                self.store.update_transfer(tr["id"], status, why)
+                self.store.event("kept" if status == "skipped" else "transfer", tr["hash"], f"{tr['name']}: {why}")
+            elif c.get("status") in ("failed", "aborted", "cancelled", "orphaned"):
+                self.store.update_transfer(tr["id"], "failed",
+                                           c.get("message") or c.get("exception") or c["status"])
+
+    def _imported(self, h, since):
+        """Where Sonarr put this download, if it imported it after `since`; else ''."""
+        recs = self.sonarr.get("history", downloadId=h.upper(), eventType=3, pageSize=20,
+                               sortKey="date", sortDirection="descending")
+        recs = recs.get("records", []) if isinstance(recs, dict) else (recs or [])
+        for r in recs:
+            if (_ts(r.get("date")) or 0) >= since - 60:
+                return (r.get("data") or {}).get("importedPath") or "imported"
+        return ""
+
+    def _why_not_imported(self, h):
+        """After a scan that imported nothing: ("skipped", why) when every episode it is
+        for already has a library file this copy does not beat by the profile's minimum
+        upgrade -- Sonarr was right to leave it -- else ("failed", why)."""
+        recs = self._grabs_by_hash().get(h, [])
+        eps = sorted({r["episodeId"] for r in recs if r.get("episodeId")})
+        if not eps:
+            return "failed", "Sonarr finished without importing it"
+        score = max((r.get("customFormatScore") or 0) for r in recs)
+        need = self.sonarr.min_upgrade()
+        episodes = self.sonarr.get("episode", episodeIds=eps) or []
+        kept = len(episodes) == len(eps)
+        for e in episodes:
+            if not e.get("hasFile") or not e.get("episodeFileId"):
+                kept = False
+                break
+            f = self.sonarr.get(f"episodefile/{e['episodeFileId']}") or {}
+            if score >= (f.get("customFormatScore") or 0) + need:
+                kept = False
+                break
+        if kept:
+            return "skipped", "Sonarr kept the library's copy: this one is not better by enough to replace it"
+        if any((e.get("title") or "").strip().upper() == "TBA" for e in episodes):
+            return "failed", ("Sonarr will not import an episode still titled TBA until two days after it airs;"
+                              " Magnet keeps trying")
+        return "failed", "Sonarr finished without importing it"
+
+    def copy_states(self, decisions=None, grabs=None):
+        """Torrent hash -> (copy status, message) for each finished, approved torrent:
+        waiting (the automatic copy will take it), running, done, skipped (the library's
+        copy is as good), failed (the automatic copy has given up), or None (it never
+        will take this one: Bring to NAS). The same rule auto_transfer acts on."""
+        decisions = decisions if decisions is not None else self.store.decisions()
+        grabs = grabs if grabs is not None else self._grabs_by_hash()
+        latest, failures = {}, {}
+        for tr in self.store.transfers(500):              # newest first
+            latest.setdefault(tr["hash"], tr)
+            if tr["status"] == "failed":
+                failures[tr["hash"]] = failures.get(tr["hash"], 0) + 1
+        finished = [h for h, t in self.gate.known.items()
+                    if decisions.get(h, {}).get("verdict") == "approved" and qbstate.is_finished(t)]
+        given_up = {h for h in finished if failures.get(h, 0) > len(self.AUTO_RETRY_DELAYS)}
+        # Only what Sonarr grabbed has an episode to go to.
+        cover = {}
+        for h in finished:
+            if grabs.get(h):
+                cover[h] = (max((r.get("customFormatScore") or 0) for r in grabs[h]),
+                            {r["episodeId"] for r in grabs[h] if r.get("episodeId")})
+
+        def beaten(h):
+            score, eps = cover[h]
+            return bool(eps) and all(any(o != h and o not in given_up and s > score and e in oe
+                                         for o, (s, oe) in cover.items()) for e in eps)
+        out = {}
+        for h in finished:
+            tr = latest.get(h)
+            message = tr["message"] if tr else ""
+            if tr and tr["status"] in ("running", "done", "skipped"):
+                out[h] = (tr["status"], message)
+            elif tr and tr["status"] == "failed" and (h in given_up or not self.auto_copy):
+                out[h] = ("failed", message)
+            elif self.auto_copy and h in cover and not beaten(h):
+                out[h] = ("waiting", message)
+            else:
+                out[h] = (None, message)
+        return out
+
+    def auto_transfer(self):
+        """Every finished episode the gate approved goes to its show folder by itself.
+
+        Only torrents Sonarr grabbed, so each has an episode to go to; the best copy
+        first; and not one whose episodes all have a better copy finished already --
+        the scout removes that one from the seedbox instead."""
+        if not self.auto_copy or not self.gate.last_poll or time.time() - self.gate.last_poll > 300:
+            return
+        if not self.sonarr.alive():
+            return              # frozen while Plex streams; it catches up afterwards
+        grabs = self._grabs_by_hash()
+        states = self.copy_states(self.store.decisions(), grabs)
+        latest, failures = {}, {}
+        for tr in self.store.transfers(500):              # newest first
+            latest.setdefault(tr["hash"], tr)
+            if tr["status"] == "failed":
+                failures[tr["hash"]] = failures.get(tr["hash"], 0) + 1
+        now = time.time()
+        waiting = [h for h, (status, _) in states.items() if status == "waiting"]
+        for h in sorted(waiting, key=lambda h: -max((r.get("customFormatScore") or 0) for r in grabs[h])):
+            tries = failures.get(h, 0)
+            if tries and now - latest[h]["updated"] < self.AUTO_RETRY_DELAYS[min(tries, len(self.AUTO_RETRY_DELAYS)) - 1]:
+                continue
+            t = self.gate.known.get(h) or {}
+            try:
+                self.transfer(h)
+            except ValueError as e:
+                self.store.fail_transfer(h, t.get("name", h), str(e))
+                self.store.event("transfer", h, f"{t.get('name', h)}: could not copy it to the NAS -- {e}")
+            except (SonarrError, UpstreamError, AuthRejected):
+                return          # nothing to record: Sonarr or the seedbox is not answering
+
     def watch_transfers(self, interval=10):
         while True:
             try:
-                for tr in self.store.running_transfers():
-                    try:
-                        c = self.sonarr.command(tr["command_id"])
-                    except SonarrError:
-                        continue
-                    if c.get("status") == "completed":
-                        self.store.update_transfer(tr["id"], "done", c.get("message") or "")
-                        self.store.event("transferred", tr["hash"], f"{tr['name']}: on the NAS")
-                    elif c.get("status") in ("failed", "aborted", "cancelled", "orphaned"):
-                        self.store.update_transfer(tr["id"], "failed",
-                                                   c.get("message") or c.get("exception") or c["status"])
+                self.check_transfers()
+                self.auto_transfer()
             except Exception as e:
                 # A worker that dies silently leaves every transfer "on its way" forever.
                 self.log(f"transfers: {type(e).__name__}: {e}")

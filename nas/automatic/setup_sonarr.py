@@ -343,15 +343,16 @@ def main():
         if d["name"] != CLIENT and d.get("protocol") == "torrent" and d["enable"]:
             d["enable"] = False
             do(f"disable download client {d['name']}", lambda d=d: call("PUT", f"downloadclient/{d['id']}", d))
-    # Episodes reach the NAS only through Bring to NAS, which checks the files again.
-    # With this on, Sonarr would import each one the moment it finished.
+    # Episodes reach the NAS only through Magnet's copy (by itself, or Bring to NAS),
+    # which checks the files again first. With this on, Sonarr would import each one
+    # the moment it finished, past that check.
     if dlconfig.get("enableCompletedDownloadHandling") or not dlconfig.get("autoRedownloadFailed"):
         dlconfig.update(enableCompletedDownloadHandling=False, autoRedownloadFailed=True)
         do("turn off Completed Download Handling (keep re-searching after a failure)",
            lambda: call("PUT", f"config/downloadclient/{dlconfig['id']}", dlconfig))
     if not plan and call("GET", "config/downloadclient").get("enableCompletedDownloadHandling") is not False:
         # If this Sonarr ignores the setting, it would import every episode the moment it
-        # finished, past Bring to NAS and its file check. Say so instead of "done".
+        # finished, past Magnet's copy and its file check. Say so instead of "done".
         sys.exit("Sonarr did not turn off Completed Download Handling; turn it off in Settings -> "
                  "Download Clients before using Automatic mode")
 

@@ -63,6 +63,28 @@ do {
     check("overview decodes", false, "\(error)")
 }
 
+print("Test 1b - a NAS that copies by itself shows the button only once it has given up")
+do {
+    func torrent(_ copy: String) -> String {
+        overviewJSON.replacingOccurrences(of: #""episodeTitle": "Four", "transferring": false, "onNAS": false,"#,
+                                          with: #""episodeTitle": "Four", "transferring": false, "onNAS": false, "copyStatus": "#
+                                            + copy + #", "copyMessage": "","#)
+            .replacingOccurrences(of: #""minFreeBytes": 107374182400}"#, with: #""minFreeBytes": 107374182400, "autoCopy": true}"#)
+    }
+    for (copy, button) in [("\"waiting\"", false), ("\"running\"", false), ("\"skipped\"", false),
+                           ("\"done\"", false), ("\"failed\"", true)] {
+        let o = try JSONDecoder().decode(AutoOverview.self, from: Data(torrent(copy).utf8))
+        check("copy \(copy): Bring to NAS \(button ? "shown" : "hidden")",
+              o.seedbox.torrents[0].canBringToNAS == button && o.seedbox.autoCopy == true,
+              "copyStatus \(String(describing: o.seedbox.torrents[0].copyStatus))")
+    }
+    let old = try JSONDecoder().decode(AutoOverview.self, from: Data(overviewJSON.utf8))
+    check("a NAS that never copies by itself keeps the button", old.seedbox.autoCopy == nil
+          && old.seedbox.torrents[0].copyStatus == nil && old.seedbox.torrents[0].canBringToNAS)
+} catch {
+    check("auto-copy overview decodes", false, "\(error)")
+}
+
 print("Test 2 - an older NAS without the sources field still decodes")
 do {
     let older = overviewJSON.replacingOccurrences(of: #""sources": {"sites""#, with: #""ignored": {"sites""#)

@@ -64,7 +64,8 @@ def main():
                   remove_superseded=env("SCOUT_REMOVE_SUPERSEDED", "true").lower() == "true",
                   first_copy_max_hours=float(env("SCOUT_FIRST_COPY_MAX_HOURS", "4")))
     api = API(gate, sonarr, store, env("API_TOKEN"), (src, dst), plex_access(),
-              int(env("SUGGEST_WATCHED_DAYS", "30")), log, sources, scout)
+              int(env("SUGGEST_WATCHED_DAYS", "30")), log, sources, scout,
+              auto_copy=env("AUTO_COPY", "true").lower() == "true")
 
     threading.Thread(target=gate.run, name="watcher", daemon=True).start()
     threading.Thread(target=api.watch_transfers, name="transfers", daemon=True).start()
