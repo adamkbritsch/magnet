@@ -54,8 +54,9 @@ class API:
     AUTO_RETRY_DELAYS = (15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 24 * 3600)
 
     def __init__(self, gate, sonarr, store, token, path_map, plex=None, watched_days=30, log=print, sources=None,
-                 scout=None, auto_copy=True):
+                 scout=None, auto_copy=True, seasons=None):
         self.auto_copy = auto_copy
+        self.seasons = seasons    # Seasons, or None: Sonarr's own folder is kept
         self._transfer_lock = threading.Lock()
         self._episodes = {}       # episode id -> (when, episode record), for naming seedbox rows
         self.sources = sources    # SourceSync, or None when Prowlarr is not configured
@@ -399,6 +400,8 @@ class API:
         self.need_sonarr()
         if self.store.active_transfer(h):
             raise ValueError("already on its way")
+        if self.seasons and {g.get("seriesId") for g in self._grabs_by_hash().get(h, [])} & self.seasons.busy():
+            raise ValueError("its show's season folders are being sorted out; try again in a minute")
         # The file list is checked again at the last door, not just the first.
         files = self.qbit.files(h)
         ok, reason, bad = rules.judge((f["name"], f.get("size", 0)) for f in files)
@@ -429,8 +432,16 @@ class API:
                 except SonarrError:
                     continue
                 if imported:
-                    self.store.update_transfer(tr["id"], "done", imported)
+                    paths = {}
+                    for r in imported:
+                        p = (r.get("data") or {}).get("importedPath")
+                        if p and r.get("episodeId"):
+                            paths.setdefault((r.get("seriesId"), p), []).append(r["episodeId"])
+                    self.store.update_transfer(tr["id"], "done", next(iter(paths), (None, "imported"))[1])
                     self.store.event("transferred", tr["hash"], f"{tr['name']}: on the NAS")
+                    if self.seasons and self.seasons.enabled():
+                        for (series, p), eps in paths.items():
+                            self.seasons.queue(series, p, eps)
                     continue
                 # Nothing arrived. Kept only when the library really has this episode at
                 # least as good; anything else is a failure, and is tried again.
@@ -445,14 +456,12 @@ class API:
                                            c.get("message") or c.get("exception") or c["status"])
 
     def _imported(self, h, since):
-        """Where Sonarr put this download, if it imported it after `since`; else ''."""
-        recs = self.sonarr.get("history", downloadId=h.upper(), eventType=3, pageSize=20,
+        """Sonarr's import records for this download from after `since` (one for each
+        episode it filed), or [] when it imported nothing."""
+        recs = self.sonarr.get("history", downloadId=h.upper(), eventType=3, pageSize=50,
                                sortKey="date", sortDirection="descending")
         recs = recs.get("records", []) if isinstance(recs, dict) else (recs or [])
-        for r in recs:
-            if (_ts(r.get("date")) or 0) >= since - 60:
-                return (r.get("data") or {}).get("importedPath") or "imported"
-        return ""
+        return [r for r in recs if (_ts(r.get("date")) or 0) >= since - 60]
 
     def _why_not_imported(self, h):
         """After a scan that imported nothing: ("skipped", why) when every episode it is
@@ -550,16 +559,25 @@ class API:
         # the new one, so two at once leave the episode without a file twice over.
         importing = {r.get("episodeId") for h, (status, _) in states.items() if status == "running"
                      for r in grabs.get(h, [])}
+        # And one import per show at a time, so each is in its season folder before
+        # Sonarr writes the next one into its own.
+        shows = {r.get("seriesId") for h, (status, _) in states.items() if status == "running"
+                 for r in grabs.get(h, [])} - {None}
+        # Nor while an episode of the same show is still being put in its season folder:
+        # an import then would act on files about to move.
+        placing = self.seasons.busy() if self.seasons else set()
         waiting = [h for h, (status, _) in states.items() if status == "waiting"]
         for h in sorted(waiting, key=lambda h: -max((r.get("customFormatScore") or 0) for r in grabs[h])):
             eps = {r.get("episodeId") for r in grabs[h]}
-            if eps & importing:
+            series = {r.get("seriesId") for r in grabs[h]} - {None}
+            if eps & importing or series & (placing | shows):
                 continue
             tries = failures.get(h, 0)
             if tries and now - latest[h]["updated"] < self.AUTO_RETRY_DELAYS[min(tries, len(self.AUTO_RETRY_DELAYS)) - 1]:
                 continue
             t = self.gate.known.get(h) or {}
             importing |= eps
+            shows |= series
             try:
                 self.transfer(h)
             except ValueError as e:

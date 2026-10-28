@@ -246,13 +246,27 @@ Only new episodes are fetched; following a show never downloads its back catalog
   download that stops moving for three hours, or a first copy too slow to finish, is
   replaced.
 - **The copy to the NAS** starts once a download the gate passed has finished, best copy
-  first, one per episode at a time. Sonarr copies it into the show's folder and names it;
+  first, one per show at a time. Sonarr copies it into the show's folder and names it;
   it counts as on the NAS only when Sonarr records the import. One Sonarr leaves out because the library's copy
   is already as good is marked so. Any other copy that does not arrive is tried again over
   about two days (Sonarr will not import an episode still titled "TBA" until two days
   after it airs), and then **Bring to NAS** appears on the Seedbox tab so you can try it
   yourself. Set `AUTO_COPY=false` in `site.env` to leave every episode on the seedbox
   until you press **Bring to NAS**.
+- **Season folders are read the way Plex reads them.** Each episode goes into the folder
+  Plex already files that season under, whatever it is called; a season the show does
+  not have yet gets a folder named like its others ("Season 3", or "Season 03" where the
+  show pads). A season Plex can only find by its file names — a release-named folder,
+  `S03`, episodes loose in the show's folder, two folders for one season — is renamed to
+  "Season N" on the way: its episodes and their subtitles move, and extras folders,
+  files Plex does not list, and an episode in a season folder with another number stay
+  put, as do Plex's optimized versions. Every move is written to an undo script
+  (`season-undo-*.sh` in the service's data folder) before it happens, and an
+  interrupted batch is finished on the next try. Sonarr is rescanned and keeps the
+  release name each file was scored by, and no other import for that show starts until
+  it has; Plex rescans the show, and once it has found a moved episode, a watched mark
+  or resume point it dropped is put back. Show folders listed in `SEASON_SKIP` are never
+  touched, and `SEASON_FOLDERS=false` leaves files where Sonarr puts them.
 - **Your site bar decides where it searches** (once Prowlarr is set up — see below). The
   sites in the bar are matched to Prowlarr's indexers for them and tagged, and Prowlarr
   gives Sonarr exactly those; if none of them can search for TV, Sonarr keeps every indexer
@@ -285,13 +299,16 @@ container at `/seedbox/downloads/` — that is where episodes are copied to the 
 4. On the NAS, in that folder: `python3 setup_sonarr.py --plan` to see what it will change,
    then the same without `--plan`. It points Sonarr at the gate (turning off Sonarr's other
    torrent clients and its own importing, so episodes reach the NAS only through Magnet's
-   copy, which checks the files again first), sets up the scoring, switches to new episodes only, and moves the shows
-   Sonarr already follows that are still airing onto Magnet's profile. It snapshots what it
+   copy, which checks the files again first), sets up the scoring, switches to new
+   episodes only, and moves the shows Sonarr already follows that are still airing onto
+   Magnet's profile. It snapshots what it
    changes and prints the snapshot's path; `python3 rollback_sonarr.py <that file>` puts it
    back, leaving Magnet's scoring and gate in Sonarr, unused.
 
 The scout's timings (`SCOUT_*`) are in `site.env`; run `deploy.sh` again after changing
-them.
+them. For season folders, `deploy.sh` also mounts every TV folder that both Sonarr and
+Plex see, at Sonarr's own paths — it reads them from the two containers, named by
+`SONARR_CONTAINER` and `PLEX_CONTAINER` in `site.env`.
 
 ## Keyboard
 

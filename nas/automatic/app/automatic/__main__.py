@@ -10,6 +10,7 @@ from .api import API, make_handler as api_handler
 from .gate import Gate, make_handler as gate_handler
 from .qbit import QBit
 from .scout import Scout
+from .seasons import LibraryMap, Plex, Seasons
 from .sonarr import Sonarr, read_api_key
 from .sources import Prowlarr, ProwlarrError, SourceSync, read_api_key as prowlarr_key
 from .store import Store
@@ -46,6 +47,10 @@ def main():
     qbit = QBit(env("QB_URL"), os.path.join(data, "secrets.json"))
     # Short timeout: a Sonarr frozen by stream-guard must not stall the watcher.
     sonarr = Sonarr(env("SONARR_URL"), read_api_key(env("SONARR_CONFIG")), timeout=10)
+    # Its own client, with time to answer: listing a long show's files takes a while.
+    sonarr_slow = Sonarr(env("SONARR_URL"), read_api_key(env("SONARR_CONFIG")), timeout=120)
+    # New folders as Sonarr makes them: group-writable, like the rest of the library.
+    os.umask(0o002)
     gate = Gate(qbit, sonarr, store, env("QB_CATEGORY", "tv-sonarr"), env("GATE_USER"), env("GATE_PASS"),
                 int(float(env("MIN_FREE_GB", "100")) * 1024 ** 3), log)
     src, _, dst = env("PATH_MAP", "/downloads/=/seedbox/downloads/").partition("=")
@@ -63,20 +68,31 @@ def main():
                   stall_hours=float(env("SCOUT_STALL_HOURS", "3")),
                   remove_superseded=env("SCOUT_REMOVE_SUPERSEDED", "true").lower() == "true",
                   first_copy_max_hours=float(env("SCOUT_FIRST_COPY_MAX_HOURS", "4")))
+    # Season folders: only with the library mounted (deploy.sh mounts what Sonarr and
+    # Plex both see, at Sonarr's paths) and not switched off.
+    seasons = None
+    library = LibraryMap(os.environ.get("LIBRARY_MAP", ""))
+    if library.roots and os.environ.get("SEASON_FOLDERS", "true").lower() == "true":
+        px = plex_access()
+        seasons = Seasons(sonarr_slow, Plex(*px) if px else None, library, store, log,
+                          skip=os.environ.get("SEASON_SKIP", "").split("|"), data_dir=data)
     api = API(gate, sonarr, store, env("API_TOKEN"), (src, dst), plex_access(),
               int(env("SUGGEST_WATCHED_DAYS", "30")), log, sources, scout,
-              auto_copy=env("AUTO_COPY", "true").lower() == "true")
+              auto_copy=env("AUTO_COPY", "true").lower() == "true", seasons=seasons)
 
     threading.Thread(target=gate.run, name="watcher", daemon=True).start()
     threading.Thread(target=api.watch_transfers, name="transfers", daemon=True).start()
     if sources:
         threading.Thread(target=sources.run, name="sources", daemon=True).start()
     threading.Thread(target=scout.run, name="scout", daemon=True).start()
+    if seasons:
+        threading.Thread(target=seasons.run, name="seasons", daemon=True).start()
     gate_srv = http.server.ThreadingHTTPServer(("0.0.0.0", int(env("GATE_PORT", "8791"))), gate_handler(gate))
     api_srv = http.server.ThreadingHTTPServer(("0.0.0.0", int(env("API_PORT", "8790"))), api_handler(api))
     threading.Thread(target=gate_srv.serve_forever, name="gate", daemon=True).start()
     log(f"magnet-automatic: gate on :{gate_srv.server_address[1]}, API on :{api_srv.server_address[1]};"
-        f" seedbox login {'present' if qbit.configured else 'NOT SET'}")
+        f" seedbox login {'present' if qbit.configured else 'NOT SET'};"
+        f" season folders {'on, ' + str(len(library.roots)) + ' library folders' if seasons else 'off'}")
     api_srv.serve_forever()
 
 

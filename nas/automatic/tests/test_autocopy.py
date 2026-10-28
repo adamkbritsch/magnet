@@ -209,3 +209,52 @@ class AutoCopy(Harness):
         self.gate.poll()
         row = self.api.seedbox(titles={9: "Show"})["torrents"][0]
         self.assertEqual((row["series"], row["season"], row["episode"]), ("Show", 1, None))
+
+
+class ToSeasonFolders(AutoCopy):
+    class Placing:
+        def __init__(self):
+            self.queued, self.held = [], set()
+
+        def enabled(self):
+            return True
+
+        def queue(self, series, path, eps):
+            self.queued.append((series, path, sorted(eps)))
+
+        def busy(self):
+            return self.held
+
+    def setUp(self):
+        super().setUp()
+        self.api.seasons = self.Placing()
+
+    def test_an_import_is_handed_on_to_be_put_in_its_season_folder(self):
+        h = self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.sn.imports[h.upper()] = [
+            {"date": iso(time.time()), "seriesId": 9, "episodeId": 5,
+             "data": {"importedPath": "/tv/Show/Season 01/Show - S01E05.mkv"}}]
+        self.api.check_transfers()
+        self.assertEqual(self.api.seasons.queued, [(9, "/tv/Show/Season 01/Show - S01E05.mkv", [5])])
+
+    def test_no_import_for_a_show_while_one_of_its_episodes_is_being_placed(self):
+        self.api.seasons.held = {9}
+        self.finished(CLEAN)
+        self.api.auto_transfer()
+        self.assertEqual(self.scans(), [])
+        self.api.seasons.held = set()
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1)
+
+    def test_bring_to_nas_waits_too(self):
+        h = self.finished(CLEAN)
+        self.api.seasons.held = {9}
+        with self.assertRaisesRegex(ValueError, "season folders"):
+            self.api.transfer(h)
+
+    def test_one_import_per_show_at_a_time(self):
+        a = self.finished(make_torrent("Show.S01E05.1080p", [("Show.S01E05.1080p.mkv", 2 * GB)]), ep=5)
+        b = self.finished(make_torrent("Show.S01E06.1080p", [("Show.S01E06.1080p.mkv", 2 * GB)]), ep=6)
+        self.api.auto_transfer()
+        self.assertEqual(len(self.scans()), 1, "the second episode of the show waits its turn")

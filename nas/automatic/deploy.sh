@@ -52,6 +52,62 @@ if [[ ! -d "\$DATA" ]]; then
   docker run --rm -v "\$(dirname "\$DATA")":/v python:3.12-alpine sh -c "mkdir -p /v/\$(basename "\$DATA")/rollback && chown -R \${PUIDV:-1000}:\${PGIDV:-1000} /v/\$(basename "\$DATA") && chmod 750 /v/\$(basename "\$DATA")"
   echo "    created \$DATA"
 fi
+# Season folders: the TV library mounted at Sonarr's own paths -- every folder Sonarr
+# and Plex both see, read from the two containers' mounts -- so a path means the same
+# thing to all three. Written as an override beside docker-compose.yml.
+python3 - <<'PY'
+import json, os, subprocess
+env = {}
+for line in open(".env"):
+    k, _, v = line.rstrip("\n").partition("=")
+    if k and not k.startswith("#"):
+        env[k] = v
+def mounts(name):
+    try:
+        out = subprocess.check_output(["docker", "inspect", name], stderr=subprocess.DEVNULL)
+        return json.loads(out)[0].get("Mounts", [])
+    except Exception:
+        return []
+# The service's own folders inside its container: a library mount there would replace them.
+RESERVED = ("/app", "/data", "/sonarr", "/prowlarr", "/plex")
+def clashes(d):
+    return d in ("", "/") or any(d == r or d.startswith(r + "/") or r.startswith(d + "/") for r in RESERVED)
+roots = []
+plex = mounts(env.get("PLEX_CONTAINER") or "plex")
+for m in mounts(env.get("SONARR_CONTAINER") or "sonarr"):
+    hs, sd = m["Source"].rstrip("/"), m["Destination"].rstrip("/")
+    for p in plex:
+        hp, pd = p["Source"].rstrip("/"), p["Destination"].rstrip("/")
+        if not hs or not hp:
+            continue
+        if hs == hp or hs.startswith(hp + "/"):          # Sonarr's folder is inside Plex's
+            root = (hs, sd, pd + hs[len(hp):])
+        elif hp.startswith(hs + "/"):                     # Plex's folder is inside Sonarr's: just that part
+            root = (hp, sd + hp[len(hs):], pd)
+        else:
+            continue
+        if clashes(root[1]):
+            print("    season folders: not mounting " + root[1] + " -- the service uses that path itself")
+        else:
+            roots.append(root)
+        break
+on = (env.get("SEASON_FOLDERS") or "true").lower() == "true" and bool(roots)
+lines = [l for l in open(".env") if not l.startswith("LIBRARY_MAP=")]
+lines.append("LIBRARY_MAP=" + ("|".join(">".join(r) for r in roots) if on else "") + "\n")
+with open(".env.tmp", "w") as f:
+    f.writelines(lines)
+os.chmod(".env.tmp", 0o600)
+os.replace(".env.tmp", ".env")
+if on:
+    with open("docker-compose.override.yml", "w") as f:
+        f.write("# Written by deploy.sh: the TV library at Sonarr's paths, for season folders.\n")
+        f.write("services:\n  automatic:\n    volumes:\n")
+        for h, s, _ in roots:
+            f.write("      - " + json.dumps(h + ":" + s) + "\n")
+elif os.path.exists("docker-compose.override.yml"):
+    os.remove("docker-compose.override.yml")
+print("    season folders:", ("%d library folders" % len(roots)) if on else "off")
+PY
 docker compose up -d --force-recreate 2>&1 | tail -2
 sleep 3
 docker logs --tail 4 magnet-automatic 2>&1
