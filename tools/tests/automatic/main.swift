@@ -89,6 +89,63 @@ do {
     check("auto-copy overview decodes", false, "\(error)")
 }
 
+print("Test 1c - activity, a show's page, pause")
+do {
+    let feed = """
+    {"events": [
+      {"id": 3, "at": "2026-10-28T03:39:50Z", "kind": "transferred", "hash": "aa", "message": "X: on the NAS",
+       "detail": "on the NAS", "subject": "X", "seriesId": 7, "series": "Example Show", "season": 1, "episode": 5,
+       "episodeTitle": "Five", "formats": ["2160p", "DV Boost"], "upgrade": true},
+      {"id": 2, "at": "2026-10-28T03:00:00Z", "kind": "rejected", "hash": "bb", "message": "Y: rejected -- contains an executable (.exe)",
+       "detail": "rejected -- contains an executable (.exe)", "subject": "Y", "seriesId": 7, "series": "Example Show",
+       "season": 1, "episode": 6, "episodeTitle": null, "formats": [], "upgrade": false},
+      {"id": 1, "at": "2026-10-27T03:00:00Z", "kind": "quality", "hash": null, "message": "Example Show: only Dolby Vision",
+       "detail": "only Dolby Vision", "subject": "Example Show", "seriesId": null, "series": null, "season": null,
+       "episode": null, "episodeTitle": null, "formats": [], "upgrade": false}],
+     "latest": 3, "attention": [{"key": "copy-aa", "title": "Could not copy X to the NAS", "detail": "nope"}]}
+    """
+    let f = try JSONDecoder().decode(AutoActivityFeed.self, from: Data(feed.utf8))
+    check("an upgrade reads as one", f.events[0].text == "Upgraded in the library" && f.events[0].category == .library,
+          f.events[0].text)
+    check("its quality is badged, Dolby Vision first", f.events[0].badges.map(\.text) == ["Dolby Vision", "4K"])
+    check("a refusal gives its reason", f.events[1].text == "Refused: contains an executable (.exe)"
+          && f.events[1].category == .refused, f.events[1].text)
+    check("a show's level change is a control", f.events[2].category == .control
+          && f.events[2].text == "New episodes: only Dolby Vision", f.events[2].text)
+    check("attention decodes", f.attention.first?.id == "copy-aa")
+
+    let show = """
+    {"show": {"id": 7, "tvdbId": 1, "title": "Example Show", "year": 2026, "status": "continuing", "network": null,
+      "monitored": true, "nextAiring": null, "previousAiring": null, "poster": null, "overview": "", "path": "/tv/x",
+      "magnetProfile": true, "quality": "dv"},
+     "profile": "Magnet Dolby Vision", "levels": [{"id": "first", "title": "a"}, {"id": "4k", "title": "b"}, {"id": "dv", "title": "c"}],
+     "seasons": [{"season": 1, "episodes": [
+       {"id": 105, "season": 1, "episode": 5, "title": "Five", "airDateUtc": "2026-10-28T01:00:00Z", "monitored": true,
+        "hasFile": true, "file": {"quality": "WEBDL-2160p", "formats": ["2160p", "DV Boost"], "score": 15025,
+        "size": 4352377707, "path": "Season 01/x.mkv"}, "betterUntil": null},
+       {"id": 106, "season": 1, "episode": 6, "title": "Six", "airDateUtc": "2099-01-01T00:00:00Z", "monitored": true,
+        "hasFile": false, "file": null, "betterUntil": null}]}],
+     "seedbox": [], "activity": [], "paused": false}
+    """
+    let d = try JSONDecoder().decode(AutoShowDetail.self, from: Data(show.utf8))
+    check("a show's page decodes with its level", d.show.quality == "dv" && d.levels.count == 3)
+    check("an episode in the library carries its quality",
+          d.seasons[0].episodes[0].file?.badges.first?.text == "Dolby Vision" && d.seasons[0].episodes[0].aired)
+    check("an episode still to air is not aired", !d.seasons[0].episodes[1].aired && d.seasons[0].title == "Season 1")
+
+    let paused = overviewJSON.replacingOccurrences(of: #"{"version": "1.0.0","#, with: #"{"version": "1.2.0", "paused": true,"#)
+    let o = try JSONDecoder().decode(AutoOverview.self, from: Data(paused.utf8))
+    check("paused is read", o.paused == true)
+    let withID = overviewJSON.replacingOccurrences(of: #""upcoming": [{"seriesId": 7,"#, with: #""upcoming": [{"id": 105, "seriesId": 7,"#)
+    let o2 = try JSONDecoder().decode(AutoOverview.self, from: Data(withID.utf8))
+    check("an upcoming episode carries its id for Search Now", o2.upcoming[0].episodeId == 105
+          && o2.upcoming[0].id == "7-1-5")
+    let old = try JSONDecoder().decode(AutoOverview.self, from: Data(overviewJSON.utf8))
+    check("an older NAS says nothing of pause or ids", old.paused == nil && old.upcoming[0].episodeId == nil)
+} catch {
+    check("activity and show pages decode", false, "\(error)")
+}
+
 print("Test 2 - an older NAS without the sources field still decodes")
 do {
     let older = overviewJSON.replacingOccurrences(of: #""sources": {"sites""#, with: #""ignored": {"sites""#)

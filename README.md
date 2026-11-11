@@ -58,6 +58,10 @@ needs neither; the file downloader and automatic TV use both.
   closely in the first two days, when 4K and Dolby Vision releases usually appear.
 - **Each episode goes into your library by itself** as soon as it finishes downloading,
   and a better copy found later replaces it.
+- **You can see and steer all of it:** a history of everything it did, a page per show
+  with what the library holds and in what quality, a pause switch, a search on demand,
+  per-show quality ("wait for 4K", "wait for Dolby Vision"), and a Mac notification when
+  an episode is ready.
 
 ## What you need
 
@@ -117,6 +121,14 @@ the left of the bar (⌃⌘S). Drag the line between them to resize; double-clic
 evenly.
 
 **Downloads from a page** ask first — see [Direct downloads](#direct-downloads).
+
+**When the proxy does not answer**, the screen says why where it can tell: if the proxy's
+address is a Tailscale one, Magnet asks Tailscale on this Mac whether the NAS's sign-in
+has expired (Tailscale keys do, unless key expiry is turned off for that machine), whether
+the NAS is offline on the tailnet, or whether Tailscale is off on this Mac. A month before
+the NAS's sign-in expires, a line over the browser says so. Give the proxy's home-network
+address too (Settings → Connection → **At home**) and Magnet uses it when the usual one
+does not answer — still through the proxy, never directly — and says it is doing so.
 
 **Getting out.** The open-in-browser button (an arrow leaving a box, next to the route
 indicator) hands the page to your normal browser, outside the proxy, for anything Magnet
@@ -229,11 +241,37 @@ Follow a show in the **Following** tab. From then on:
 
 | Tab | Shows |
 |---|---|
-| **Following** | Your shows. Search to follow another; right-click one to stop following (nothing is deleted). |
-| **Coming Up** | The last three days and next four weeks, and where each episode is. |
+| **Following** | Your shows. Click one for its page; search to follow another; right-click one to stop following (nothing is deleted). |
+| **Coming Up** | The last three days and next four weeks, and where each episode is. An aired episode still waiting has **Search Now**. |
+| **Activity** | Everything Automatic did, episode by episode: releases found and refused, downloads, upgrades, copies to the library, season folders. Filter to what is in the library, refused, or needs a look. |
 | **Seedbox** | Each episode download until it reaches the NAS, and what made it good. |
 | **Blocked** | Releases that were refused or dropped, and why. |
 | **Suggestions** | Shows still airing that you picked in the browser or watch in Plex. |
+
+**A show's page** lists its seasons and episodes: which are in the library and in what
+quality (4K, Dolby Vision, Atmos), what is downloading, what has aired and is still
+waiting, and what Automatic has done for the show. An aired episode has **Search Now**
+(or, with a copy already there, **Find a Better Copy**, which takes a release only if it
+beats it). **New episodes** sets how choosy the show is:
+
+| Choice | What downloads |
+|---|---|
+| **First good copy** | The first good release as soon as one exists, then a better one for a week. |
+| **4K only** | Nothing below 4K, however long that takes. |
+| **Dolby Vision only** | Nothing without Dolby Vision, however long that takes. |
+
+Each is a Sonarr quality profile (`Magnet`, `Magnet 4K`, `Magnet Dolby Vision`, the last
+two made the first time they are chosen), so Sonarr's own searches hold to it too. A show
+on some other profile says so, and choosing one moves it onto Magnet's scoring.
+
+**Pause** (at the right of the tab strip) stops Automatic searching for, starting or
+copying anything new; downloads already under way finish. A release Sonarr sends while
+paused is still checked, and starts when you resume.
+
+**Notifications.** While Magnet is open, whichever mode is showing, it looks at the NAS
+every two minutes and tells you when a new episode is ready in the library, when a better
+copy replaced one, and when something needs you (a copy that gave up, a refused seedbox
+sign-in). Click one to open the show. Turn each off in Settings → Automatic.
 
 Only new episodes are fetched; following a show never downloads its back catalogue.
 
@@ -347,10 +385,10 @@ Files' keys act only while Files is showing; ⌘↩, ⌘↑ and ⌘⌫ also leav
 | Tab | For |
 |---|---|
 | **Sites** | Your home site, the sites in the bar, and a Firefox bookmark folder to fill the bar from |
-| **Connection** | The proxy everything goes through — **required** |
+| **Connection** | The proxy everything goes through — **required** — and its home-network address |
 | **Torrent Client** | qBittorrent's address and sign-in: magnets, search plugins, the qBittorrent pane |
 | **Files** | The Shuttle relay's address and token |
-| **Automatic** | The automatic TV service, and which of your sites it can search |
+| **Automatic** | The automatic TV service, which of your sites it can search, and its notifications |
 | **Downloads** | The shared folder direct downloads are filed into, and file hosts allowed to send them |
 | **Mirrors** | Other addresses for sites that move, and FMHY's list |
 | **Appearance** | Page zoom |

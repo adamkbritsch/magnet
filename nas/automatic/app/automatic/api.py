@@ -28,8 +28,14 @@ from . import qbstate, rules
 from .qbit import AuthRejected, UpstreamError
 from .sonarr import SonarrError
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 PROFILE_NAME = "Magnet"
+# How choosy a show is about its first copy. Each is a Sonarr profile, so every search
+# -- Sonarr's own, the scout's, a search asked for by hand -- holds to it.
+LEVELS = {"first": PROFILE_NAME, "4k": PROFILE_NAME + " 4K", "dv": PROFILE_NAME + " Dolby Vision"}
+LEVEL_TEXT = {"first": "the first good copy, then better ones", "4k": "only 4K",
+              "dv": "only Dolby Vision"}
+SETTLED_EPISODE = re.compile(r"^episode (\d+):")
 
 
 def _norm(title):
@@ -80,15 +86,25 @@ class API:
         self.log = log
         self._lookups = {}
         self._login_attempts = []
-        self._profile_id = None
+        self._profiles = (0.0, {})
+        self._titles = (0.0, {})
 
     # -- Sonarr helpers ----------------------------------------------------------
     def profile_id(self):
-        if self._profile_id is None:
-            for p in self.sonarr.get("qualityprofile"):
-                if p["name"] == PROFILE_NAME:
-                    self._profile_id = p["id"]
-        return self._profile_id
+        return self.profile_ids().get(PROFILE_NAME)
+
+    def profile_ids(self, fresh=False):
+        """{profile name: id}, looked up again every ten minutes or on request."""
+        when, cached = self._profiles
+        if fresh or not cached or time.time() - when > 600:
+            cached = {p["name"]: p["id"] for p in self.sonarr.get("qualityprofile") or []}
+            self._profiles = (time.time(), cached)
+        return cached
+
+    def level_of(self, profile_id):
+        """Which of Magnet's levels a profile is, or None for any other profile."""
+        names = {i: n for n, i in self.profile_ids().items()}
+        return next((lvl for lvl, name in LEVELS.items() if names.get(profile_id) == name), None)
 
     def lookup(self, term):
         hit = self._lookups.get(term)
@@ -110,7 +126,8 @@ class API:
                 "status": s.get("status"), "network": s.get("network"), "monitored": s.get("monitored", False),
                 "nextAiring": s.get("nextAiring"), "previousAiring": s.get("previousAiring"),
                 "poster": self._poster(s), "overview": (s.get("overview") or "")[:600],
-                "path": s.get("path"), "magnetProfile": s.get("qualityProfileId") == self.profile_id()}
+                "path": s.get("path"), "magnetProfile": self.level_of(s.get("qualityProfileId")) is not None,
+                "quality": self.level_of(s.get("qualityProfileId"))}
 
     # -- the views ---------------------------------------------------------------
     def overview(self):
@@ -128,7 +145,7 @@ class API:
             now = dt.datetime.now(dt.timezone.utc)
             cal = self.sonarr.get("calendar", start=(now - dt.timedelta(days=3)).isoformat(),
                                   end=(now + dt.timedelta(days=28)).isoformat(), includeSeries="true")
-            upcoming = [{"seriesId": e["seriesId"], "series": e.get("series", {}).get("title"),
+            upcoming = [{"id": e.get("id"), "seriesId": e["seriesId"], "series": e.get("series", {}).get("title"),
                          "season": e.get("seasonNumber"), "episode": e.get("episodeNumber"), "title": e.get("title"),
                          "airDateUtc": e.get("airDateUtc"), "hasFile": e.get("hasFile", False),
                          "monitored": e.get("monitored", False)}
@@ -136,7 +153,7 @@ class API:
         except SonarrError as e:
             sonarr_error = str(e)
         health = self.health(sonarr_error or None)
-        return {"version": VERSION, "following": following, "upcoming": upcoming,
+        return {"version": VERSION, "paused": self.paused(), "following": following, "upcoming": upcoming,
                 "seedbox": self.seedbox(sonarr_up=not sonarr_error, titles=titles), "blocked": self.blocked(),
                 "transfers": self.store.transfers(30), "health": health,
                 "sources": self.sources.status() if self.sources else None,
@@ -285,7 +302,10 @@ class API:
             raise SonarrError(f"Sonarr has no '{PROFILE_NAME}' quality profile; run setup_sonarr.py")
         existing = next((s for s in self.sonarr.get("series") if s.get("tvdbId") == tvdb_id), None)
         if existing:
-            existing.update(monitored=True, qualityProfileId=profile, monitorNewItems="all")
+            # Following again keeps a level chosen before; anything else gets Magnet's.
+            if self.level_of(existing.get("qualityProfileId")) is None:
+                existing["qualityProfileId"] = profile
+            existing.update(monitored=True, monitorNewItems="all")
             self.sonarr.call("PUT", f"series/{existing['id']}", body=existing)
             self.sonarr.call("POST", "seasonpass", body={"series": [{"id": existing["id"], "monitored": True}],
                                                           "monitoringOptions": {"monitor": "future"}})
@@ -321,6 +341,181 @@ class API:
         self.sonarr.call("PUT", f"series/{series_id}", body=s)
         self.store.event("unfollow", "", f"stopped following {s['title']}")
         return self._show(s)
+
+    # -- controls ----------------------------------------------------------------
+    def paused(self):
+        return bool(self.store.get("paused", False))
+
+    def set_paused(self, paused):
+        paused = bool(paused)
+        if paused != self.paused():
+            self.store.put("paused", paused)
+            self.store.event("paused" if paused else "resumed", "",
+                             "Automatic paused: nothing new is searched for, started or copied" if paused
+                             else "Automatic resumed")
+        return {"paused": paused}
+
+    def set_quality(self, series_id, level):
+        """Moves a show onto one of Magnet's levels. The profile is made the first time
+        a level is chosen, from Magnet's own."""
+        if level not in LEVELS:
+            raise ValueError(f"unknown quality level {level!r}")
+        self.need_sonarr()
+        pid = self.level_profile(level)
+        s = self.sonarr.get(f"series/{series_id}")
+        if s.get("qualityProfileId") != pid:
+            s["qualityProfileId"] = pid
+            self.sonarr.call("PUT", f"series/{series_id}", body=s)
+            self.store.event("quality", "", f"{s['title']}: {LEVEL_TEXT[level]}")
+        return self._show(s)
+
+    def level_profile(self, level):
+        name = LEVELS[level]
+        have = self.profile_ids()
+        if name in have:
+            return have[name]
+        base_id = have.get(PROFILE_NAME) or self.profile_ids(fresh=True).get(PROFILE_NAME)
+        if base_id is None:
+            raise SonarrError(f"Sonarr has no '{PROFILE_NAME}' quality profile; run setup_sonarr.py")
+        prof = self.sonarr.get(f"qualityprofile/{base_id}")
+        prof.pop("id", None)
+        prof["name"] = name
+        if level == "4k":
+            # No 720p group, and the 1080p format banned: only 2160p qualifies.
+            for item in prof.get("items", []):
+                kids = item.get("items") or []
+                if kids and all((k.get("quality") or {}).get("resolution", 0) < 1080 for k in kids):
+                    item["allowed"] = False
+            for f in prof.get("formatItems", []):
+                if f.get("name") == PROFILE_NAME + ": 1080p":
+                    f["score"] = -100000
+        elif level == "dv":
+            # Dolby Vision adds 10000; nothing without it comes near 8000.
+            prof["minFormatScore"] = 8000
+        made = self.sonarr.call("POST", "qualityprofile", body=prof)
+        self.profile_ids(fresh=True)
+        return made["id"]
+
+    def search_now(self, episode_id):
+        if not self.scout:
+            raise ValueError("the scout is not running on the NAS")
+        if self.paused():
+            raise ValueError("Automatic is paused; resume it first")
+        self.need_sonarr()
+        return self.scout.search_now(int(episode_id))
+
+    # -- activity ----------------------------------------------------------------
+    def _series_titles(self):
+        when, cached = self._titles
+        if not cached or time.time() - when > 600:
+            cached = {s["id"]: s.get("title") for s in self.sonarr.get("series") or []}
+            self._titles = (time.time(), cached)
+        return cached
+
+    def _episode_info(self, eids):
+        """{episode id: episode record}, from the cache the seedbox rows use."""
+        now = time.time()
+        missing = sorted({e for e in eids if now - self._episodes.get(e, (0, None))[0] > 3600})
+        try:
+            for i in range(0, len(missing), 50):
+                for e in self.sonarr.get("episode", episodeIds=missing[i:i + 50]) or []:
+                    self._episodes[e["id"]] = (now, e)
+        except SonarrError:
+            pass
+        return {e: self._episodes[e][1] for e in eids if e in self._episodes}
+
+    def activity(self, limit=300, since=0):
+        """What Automatic did, newest first, each event tied to its show and episode
+        where it has one. An episode's second arrival in the library is an upgrade."""
+        rows = self.store.events(1000)[::-1]                 # oldest first, for upgrades
+        try:
+            grabs = self._grabs_by_hash() if self.sonarr.alive() else {}
+            titles = self._series_titles() if grabs else {}
+        except SonarrError:
+            grabs, titles = {}, {}
+        eps_of = {}
+        for r in rows:
+            recs = grabs.get((r["hash"] or "").lower(), [])
+            eids = [g["episodeId"] for g in recs if g.get("episodeId")]
+            m = SETTLED_EPISODE.match(r["message"] or "")
+            if m:
+                eids.append(int(m.group(1)))
+            eps_of[r["id"]] = (eids, recs)
+        info = self._episode_info({e for eids, _ in eps_of.values() for e in eids}) if grabs else {}
+        arrived, out = set(), []
+        for r in rows:
+            eids, recs = eps_of[r["id"]]
+            first = info.get(eids[0]) if eids else None
+            upgrade = False
+            if r["kind"] == "transferred":
+                upgrade = any(e in arrived for e in eids)
+                arrived.update(eids)
+            message = r["message"] or ""
+            name, sep, rest = message.partition(": ")
+            out.append({"id": r["id"], "at": _iso(r["at"]), "kind": r["kind"], "hash": r["hash"] or None,
+                        "message": message, "detail": rest if sep else message, "subject": name if sep else None,
+                        "seriesId": first.get("seriesId") if first else None,
+                        "series": titles.get(first.get("seriesId")) if first else None,
+                        "season": first.get("seasonNumber") if first else None,
+                        "episode": first.get("episodeNumber") if first and len(set(eids)) == 1 else None,
+                        "episodeTitle": first.get("title") if first and len(set(eids)) == 1 else None,
+                        "formats": sorted({f["name"].removeprefix(PROFILE_NAME + ": ")
+                                           for g in recs for f in (g.get("customFormats") or [])}),
+                        "upgrade": upgrade})
+        out = [a for a in out if a["id"] > since][::-1][:limit]
+        return {"events": out, "latest": rows[-1]["id"] if rows else 0, "attention": self.attention()}
+
+    def attention(self):
+        """What needs a person: the NAS cannot download, or a copy has given up."""
+        items = []
+        if not self.qbit.configured:
+            items.append({"key": "seedbox-login", "title": "The NAS needs the seedbox sign-in",
+                          "detail": "Nothing downloads until Magnet sends it (Automatic \u2192 Send Sign-In)."})
+        elif self.qbit.blocked:
+            items.append({"key": "seedbox-blocked", "title": "The seedbox refused the NAS's sign-in",
+                          "detail": self.qbit.last_error or "Send the sign-in again from Automatic."})
+        try:
+            states = self.copy_states() if self.gate.known else {}
+        except SonarrError:
+            states = {}
+        for h, (status, message) in states.items():
+            if status == "failed":
+                name = (self.gate.known.get(h) or {}).get("name") or h
+                items.append({"key": f"copy-{h}", "title": f"Could not copy {name} to the NAS",
+                              "detail": message or "Bring it to the NAS by hand from the Seedbox tab."})
+        return items
+
+    # -- a show ------------------------------------------------------------------
+    def show(self, series_id):
+        """One show: its episodes season by season, what the library holds of each and
+        how good it is, what is on the seedbox, and what Automatic has done for it."""
+        self.need_sonarr()
+        s = self.sonarr.get(f"series/{series_id}")
+        files = {f["id"]: f for f in self.sonarr.get("episodefile", seriesId=series_id) or []}
+        seasons = {}
+        for e in self.sonarr.get("episode", seriesId=series_id) or []:
+            f = files.get(e.get("episodeFileId")) if e.get("hasFile") else None
+            ends = self.scout.window_end([e["id"]]) if self.scout else None
+            seasons.setdefault(e.get("seasonNumber", 0), []).append({
+                "id": e["id"], "season": e.get("seasonNumber"), "episode": e.get("episodeNumber"),
+                "title": e.get("title"), "airDateUtc": e.get("airDateUtc"), "monitored": e.get("monitored", False),
+                "hasFile": bool(f),
+                "file": {"quality": ((f.get("quality") or {}).get("quality") or {}).get("name"),
+                         "formats": sorted(c["name"].removeprefix(PROFILE_NAME + ": ")
+                                           for c in f.get("customFormats") or []),
+                         "score": f.get("customFormatScore"), "size": f.get("size"),
+                         "path": f.get("relativePath")} if f else None,
+                "betterUntil": _iso(ends)})
+        order = sorted(seasons, key=lambda n: (n == 0, -n))     # newest first, specials last
+        torrents = [t for t in self.seedbox(titles={s["id"]: s.get("title")})["torrents"]
+                    if t.get("series") == s.get("title")]
+        events = [a for a in self.activity(limit=1000)["events"] if a["seriesId"] == series_id][:80]
+        return {"show": self._show(s), "profile": next((n for n, i in self.profile_ids().items()
+                                                         if i == s.get("qualityProfileId")), None),
+                "levels": [{"id": k, "title": LEVEL_TEXT[k]} for k in LEVELS],
+                "seasons": [{"season": n, "episodes": sorted(seasons[n], key=lambda e: e["episode"] or 0)}
+                            for n in order],
+                "seedbox": torrents, "activity": events, "paused": self.paused()}
 
     # -- suggestions -------------------------------------------------------------
     def suggestions(self, picks):
@@ -583,6 +778,8 @@ class API:
         the scout removes that one from the seedbox instead."""
         if not self.auto_copy or not self.gate.last_poll or time.time() - self.gate.last_poll > 300:
             return
+        if self.paused():
+            return
         if not self.sonarr.alive():
             return              # frozen while Plex streams; it catches up afterwards
         grabs = self._grabs_by_hash()
@@ -627,6 +824,8 @@ class API:
         """A copy on the NAS -- or one Sonarr left out because the library's is as good --
         has nothing more to do on the seedbox: the torrent and its files are removed."""
         if not self.remove_after_copy or not self.gate.last_poll or time.time() - self.gate.last_poll > 300:
+            return
+        if self.paused():
             return
         decisions = self.store.decisions()
         latest = self._transfer_history()[0]
@@ -765,6 +964,10 @@ def make_handler(api):
                     return self._json(200, api.search(q.get("term", "")))
                 if method == "GET" and path == "/v1/events":
                     return self._json(200, api.store.events(int(q.get("limit", 200))))
+                if method == "GET" and path == "/v1/activity":
+                    return self._json(200, api.activity(int(q.get("limit", 300)), int(q.get("since", 0))))
+                if method == "GET" and path == "/v1/show":
+                    return self._json(200, api.show(int(q["id"])))
                 body = self._body() if method == "POST" else {}
                 if method == "POST" and path == "/v1/follow":
                     return self._json(200, api.follow(int(body["tvdbId"])))
@@ -774,6 +977,12 @@ def make_handler(api):
                     return self._json(200, api.suggestions([str(t) for t in body.get("picks", [])]))
                 if method == "POST" and path == "/v1/transfer":
                     return self._json(200, api.transfer(str(body["hash"])))
+                if method == "POST" and path == "/v1/pause":
+                    return self._json(200, api.set_paused(bool(body["paused"])))
+                if method == "POST" and path == "/v1/search-now":
+                    return self._json(200, api.search_now(int(body["episodeId"])))
+                if method == "POST" and path == "/v1/show-quality":
+                    return self._json(200, api.set_quality(int(body["id"]), str(body["level"])))
                 if path == "/v1/sources":
                     if not api.sources:
                         return self._json(404, {"error": "Prowlarr is not configured on the NAS side"})

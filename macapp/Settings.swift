@@ -78,6 +78,9 @@ final class AppSettings: ObservableObject {
 
     @Published var proxyHost: String { didSet { put("proxy.host", proxyHost) } }
     @Published var proxyPort: Int { didSet { put("proxy.port", proxyPort) } }
+    /// The same proxy's address on the home network, tried when the one above does not
+    /// answer (say the NAS has dropped off Tailscale). Optional.
+    @Published var proxyHomeHost: String { didSet { put("proxy.homeHost", proxyHomeHost) } }
     @Published var proxyKeychainService: String { didSet { put("proxy.keychainService", proxyKeychainService) } }
 
     var proxyConfigured: Bool { !proxyHost.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -124,6 +127,11 @@ final class AppSettings: ObservableObject {
     /// The NAS service behind Automatic mode (nas/automatic), e.g. http://nas:8790.
     /// Empty by default: until it is set, Automatic mode shows how to set it up.
     @Published var automaticServer: String { didSet { put("automatic.server", automaticServer) } }
+    /// Mac notifications from Automatic: an episode is ready, a better copy replaced
+    /// one, something needs you. All on until turned off.
+    @Published var notifyArrived: Bool { didSet { put("automatic.notify.arrived", notifyArrived) } }
+    @Published var notifyUpgraded: Bool { didSet { put("automatic.notify.upgraded", notifyUpgraded) } }
+    @Published var notifyAttention: Bool { didSet { put("automatic.notify.attention.on", notifyAttention) } }
     /// Which side of the app is showing: "manual" (the browser) or "automatic".
     @Published var mode: String { didSet { put("ui.mode", mode) } }
 
@@ -208,6 +216,7 @@ final class AppSettings: ObservableObject {
         infrastructureHosts = d.stringArray(forKey: "bookmarks.infraHosts") ?? []
 
         proxyHost = d.string(forKey: "proxy.host") ?? ""
+        proxyHomeHost = d.string(forKey: "proxy.homeHost") ?? ""
         let port = d.integer(forKey: "proxy.port")
         proxyPort = port > 0 ? port : 8888
         proxyKeychainService = d.string(forKey: "proxy.keychainService")
@@ -228,6 +237,9 @@ final class AppSettings: ObservableObject {
         shuttleShown = d.bool(forKey: "shuttle.shown")
 
         automaticServer = d.string(forKey: "automatic.server") ?? ""
+        notifyArrived = d.object(forKey: "automatic.notify.arrived") as? Bool ?? true
+        notifyUpgraded = d.object(forKey: "automatic.notify.upgraded") as? Bool ?? true
+        notifyAttention = d.object(forKey: "automatic.notify.attention.on") as? Bool ?? true
         mode = d.string(forKey: "ui.mode") == "automatic" ? "automatic" : "manual"
 
         nasHost = d.string(forKey: "nas.host") ?? ""
@@ -310,10 +322,15 @@ enum Config {
     /// The proxy address, readable without the MainActor -- every probe in the app
     /// has to reach it, and probes run wherever they run.
     static var proxyHost: String { string("proxy.host") }
+    static var proxyHomeHost: String { string("proxy.homeHost").trimmingCharacters(in: .whitespaces) }
     static var proxyPort: UInt16 {
         let stored = d.integer(forKey: "proxy.port")
         return stored > 0 && stored <= 65535 ? UInt16(stored) : 8888
     }
+
+    static var notifyArrived: Bool { d.object(forKey: "automatic.notify.arrived") as? Bool ?? true }
+    static var notifyUpgraded: Bool { d.object(forKey: "automatic.notify.upgraded") as? Bool ?? true }
+    static var notifyAttention: Bool { d.object(forKey: "automatic.notify.attention.on") as? Bool ?? true }
 
     /// The NAS service behind Automatic mode, for the off-main client.
     static var automaticBase: URL? {

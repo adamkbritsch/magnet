@@ -176,7 +176,15 @@ class FakeSonarr(_Server):
         self.releases = {}    # episode id -> what an interactive search (/release) finds
         self.taken = []       # bodies POSTed to /release
         self.looked = []      # episode ids searched through /release
-        self.profiles = [{"name": "Magnet", "minUpgradeFormatScore": 100}]
+        self.profiles = [{"id": 8, "name": "Magnet", "minUpgradeFormatScore": 100, "minFormatScore": -1000,
+                          "items": [{"id": 1100, "name": "HD 720p", "allowed": True,
+                                     "items": [{"quality": {"name": "WEBDL-720p", "resolution": 720}, "allowed": True}]},
+                                    {"id": 1101, "name": "HD and UHD", "allowed": True,
+                                     "items": [{"quality": {"name": "WEBDL-1080p", "resolution": 1080}, "allowed": True},
+                                               {"quality": {"name": "WEBDL-2160p", "resolution": 2160}, "allowed": True}]}],
+                          "formatItems": [{"name": "Magnet: 1080p", "score": 500}, {"name": "Magnet: 2160p", "score": 3000}]}]
+        self.series = {}      # series id -> /series/{id}
+        self.series_puts = [] # bodies PUT to /series/{id}
         self.alive = True
         super().__init__(_SonarrHandler)
 
@@ -213,6 +221,20 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
             return self._json({"records": s.history})
         if path == "/api/v3/calendar":
             return self._json(s.calendar)
+        if path == "/api/v3/episode" and "seriesId" in params:
+            sid = int(params["seriesId"])
+            return self._json([dict(e, id=i, hasFile=i in s.has_file, monitored=i not in s.unmonitored)
+                               for i, e in s.episodes.items() if e.get("seriesId") == sid])
+        if path == "/api/v3/episodefile" and "seriesId" in params:
+            sid = int(params["seriesId"])
+            return self._json([dict(f, id=i) for i, f in s.files.items() if f.get("seriesId") == sid])
+        if path == "/api/v3/series":
+            return self._json(list(s.series.values()))
+        if path.startswith("/api/v3/series/"):
+            return self._json(s.series.get(int(path.rsplit("/", 1)[1]), {}))
+        if path.startswith("/api/v3/qualityprofile/"):
+            pid = int(path.rsplit("/", 1)[1])
+            return self._json(json.loads(json.dumps(next(p for p in s.profiles if p.get("id") == pid))))
         if path == "/api/v3/episode":
             ids = [int(v) for k, v in urllib.parse.parse_qsl(query) if k == "episodeIds"]
             return self._json([dict(s.episodes.get(i, {}), id=i, hasFile=i in s.has_file, monitored=i not in s.unmonitored)
@@ -238,7 +260,10 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(n) or b"{}") if n else {}
         if self.path.startswith("/api/v3/episode/monitor"):
             s.monitor.append(body)
-        return self._json({})
+        if self.path.startswith("/api/v3/series/"):
+            s.series_puts.append(body)
+            s.series[int(self.path.rsplit("/", 1)[1])] = body
+        return self._json(body)
 
     def do_POST(self):
         s = self.server.owner
@@ -253,6 +278,10 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/api/v3/command":
             s.commands.append(body)
             return self._json({"id": len(s.commands), "status": "queued"})
+        if self.path == "/api/v3/qualityprofile":
+            body["id"] = max(p.get("id", 0) for p in s.profiles) + 1
+            s.profiles.append(body)
+            return self._json(body)
         return self._json({})
 
 

@@ -25,7 +25,7 @@ INSTALLED="${MAGNET_INSTALL_PATH:-$HOME/Applications/Magnet.app}"
 # every setting, every saved credential and every macOS permission grant.
 BUNDLE_ID="${MAGNET_BUNDLE_ID:-com.example.magnet}"
 EXEC_NAME="Magnet"
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -93,9 +93,9 @@ fi
 
 echo "==> Compiling"
 "$SWIFTC" -target arm64-apple-macosx14.0 -O "${SDKARGS[@]}" \
-  "$SRC"/main.swift "$SRC"/Theme.swift "$SRC"/Domains.swift "$SRC"/Settings.swift "$SRC"/Secrets.swift "$SRC"/Routes.swift \
+  "$SRC"/main.swift "$SRC"/Theme.swift "$SRC"/Domains.swift "$SRC"/Settings.swift "$SRC"/Secrets.swift "$SRC"/Routes.swift "$SRC"/Tailnet.swift \
   "$SRC"/Bookmarks.swift "$SRC"/Magnet.swift "$SRC"/SearchPlugins.swift "$SRC"/Mirrors.swift "$SRC"/Categories.swift "$SRC"/Banners.swift \
-  "$SRC"/Downloads.swift "$SRC"/Automatic.swift "$SRC"/AutomaticViews.swift \
+  "$SRC"/Downloads.swift "$SRC"/Automatic.swift "$SRC"/AutomaticViews.swift "$SRC"/AutomaticNotify.swift \
   "$SRC"/NavigationLog.swift "$SRC"/WebView.swift "$SRC"/PaneSplit.swift "$SRC"/QBittorrentPane.swift "$SRC"/shuttle/*.swift "$SRC"/RootView.swift \
   -framework AppKit -framework SwiftUI -framework WebKit \
   -framework Network -framework Security \

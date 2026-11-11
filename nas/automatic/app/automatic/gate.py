@@ -263,6 +263,7 @@ class Gate:
         self.last_poll = time.time()
         decisions = self.store.decisions()
         space = self.space_ok()
+        paused = self.paused()
         for h, t in self.known.items():
             d = decisions.get(h)
             verdict = d["verdict"] if d else None
@@ -275,10 +276,12 @@ class Gate:
                 self._reject(h, t["name"], d["reason"], json.loads(d["files"]), d["source"], new_grab=True)
                 continue
             if verdict == "waiting":
-                if space:
+                if space and not paused:
                     self.qbit.start([h])
                     self.store.decide(h, "approved", t["name"])
                 continue
+            if verdict == "paused" and paused:
+                continue        # judged and stopped; it starts once Automatic is resumed
             # held, or never seen: nothing starts until its file list has been read, and
             # nothing is judged while qBittorrent is still checking or moving it.
             state = t.get("state", "")
@@ -304,10 +307,17 @@ class Gate:
                 self._reject(h, t["name"], reason, bad, d["source"] if d else "found")
             elif not space:
                 self.store.decide(h, "waiting", t["name"], "the seedbox is low on space")
+            elif paused:
+                self.store.decide(h, "paused", t["name"], "Automatic is paused; it starts when you resume")
             else:
                 self.qbit.start([h])
                 self.store.decide(h, "approved", t["name"])
         self._report_rejections()
+
+    def paused(self):
+        """Whether Automatic is paused: nothing new starts downloading, nothing is
+        searched for or copied. Downloads already under way go on."""
+        return bool(self.store.get("paused", False))
 
     def _readd_magnet(self, h, t):
         self.qbit.post("/api/v2/torrents/delete", {"hashes": h, "deleteFiles": "false"})

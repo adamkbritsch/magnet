@@ -24,6 +24,7 @@ RSS misses and what Sonarr will not do by itself:
 """
 
 import datetime as dt
+import threading
 import time
 import traceback
 
@@ -68,6 +69,8 @@ class Scout:
         # no file for them, which is not the same as the file being gone.
         self.placing = lambda: set()
         self._home = {}
+        # A pass and a search asked for by hand share the scout's bookkeeping.
+        self._lock = threading.Lock()
         self.last_run = 0.0
         self.last_error = ""
 
@@ -99,7 +102,14 @@ class Scout:
 
     # -- the pass ----------------------------------------------------------------
     def run_once(self):
+        with self._lock:
+            self._run_once()
+
+    def _run_once(self):
         now = self.now()
+        if self.store.get("paused", False):
+            self.last_run = now
+            return              # paused: no searching, no clearing up
         self._state = self.store.get("scout.episodes", {})
         # Only act on the seedbox from a fresh look at it: a snapshot from before an
         # outage would make every download look stalled.
@@ -242,10 +252,28 @@ class Scout:
         if closing:
             self._close(closing, live)
 
-    def _grab_better(self, eid, best):
+    def search_now(self, eid):
+        """One episode, searched at once the way the scout would: a release better than
+        the copy there is, or -- with no copy -- the best one Sonarr approves."""
+        with self._lock:
+            now = self.now()
+            self._state = self.store.get("scout.episodes", {})
+            by_ep, _ = self.grabs()
+            self._home = self._still_home(by_ep)
+            present = [r for r in self._live(by_ep, now).get(eid, []) if not self._imported_away(r, eid)]
+            best = max(self._worth(r, eid) for r in present) if present else None
+            taken = self._grab_better(eid, best, loud=True)
+            self.store.put("scout.episodes", self._state)
+        if taken:
+            return {"taken": taken, "message": f"Took {taken}"}
+        return {"taken": None, "message": "Nothing better than the copy there is" if present
+                else "No release Sonarr would take yet"}
+
+    def _grab_better(self, eid, best, loud=False):
         """Search, and take a release only if it beats `best` by the profile's minimum
         upgrade -- what Sonarr itself would demand of a copy in the library. With `best`
-        None there is no copy to beat, and the best release Sonarr approves is taken."""
+        None there is no copy to beat, and the best release Sonarr approves is taken.
+        Returns the title taken, or None. `loud`: a Sonarr failure is raised, not logged."""
         s = self._state.setdefault(str(eid), {})
         s["lastSearch"] = self.now()
         s["searches"] = s.get("searches", 0) + 1
@@ -254,20 +282,25 @@ class Scout:
             found = self.sonarr.call("GET", "release", {"episodeId": eid}, timeout=180) or []
             need = float("-inf") if best is None else best + self.sonarr.min_upgrade()
         except SonarrError as e:
+            if loud:
+                raise
             self.log(f"scout: could not search for a better copy of episode {eid}: {e}")
-            return
+            return None
         better = [r for r in found if r.get("approved") and (r.get("customFormatScore") or 0) >= need]
         if not better:
-            return
+            return None
         pick = max(better, key=lambda r: (r.get("customFormatScore") or 0, r.get("seeders") or 0))
         try:
             self.sonarr.call("POST", "release", body={"guid": pick["guid"], "indexerId": pick["indexerId"]},
                              timeout=60)
         except SonarrError as e:
+            if loud:
+                raise
             self.log(f"scout: could not take {pick.get('title')}: {e}")
-            return
+            return None
         self.log(f"scout: took {pick.get('title')} (score {pick.get('customFormatScore')}) for episode {eid}"
                  + (" -- the library has no copy of it" if best is None else f" -- better than the copy there is (score {best})"))
+        return pick.get("title") or "a release"
 
     def _close(self, closing, live):
         """The week is over. Only an episode that really has a copy -- finished on the

@@ -5,10 +5,12 @@ import SwiftUI
 //
 // Nothing here decides anything. The NAS service in nas/automatic does the work --
 // Sonarr finds the episode, a gate in front of the seedbox's qBittorrent reads every
-// release's file list before a byte of it downloads, and an episode only moves to the
-// NAS when someone presses Bring to NAS. This side shows what the NAS knows, sends it
-// the occasional button press, and tells it which sites to search: the same list of
-// sites as the bar, so adding a site to Magnet is how a source is added.
+// release's file list before a byte of it downloads, a scout hunts for a better copy,
+// and each finished episode is copied into its show's season folder and then leaves the
+// seedbox. This side shows what the NAS knows and has done, sends it the occasional
+// button press (pause, search now, a show's quality), tells you when an episode is in
+// Plex, and tells it which sites to search: the same list of sites as the bar, so
+// adding a site to Magnet is how a source is added.
 
 // MARK: - What the NAS sends
 
@@ -26,6 +28,8 @@ struct AutoShow: Codable, Hashable {
     let overview: String?
     let path: String?
     let magnetProfile: Bool?
+    /// Magnet's level for the show: "first", "4k" or "dv"; nil on any other profile.
+    let quality: String?
     let inSonarr: Bool?        // search results
     let following: Bool?       // search results
     let why: String?           // suggestions
@@ -36,12 +40,14 @@ struct AutoShow: Codable, Hashable {
     func marked(following: Bool) -> AutoShow {
         AutoShow(id: id, tvdbId: tvdbId, title: title, year: year, status: status, network: network,
                  monitored: monitored, nextAiring: nextAiring, previousAiring: previousAiring, poster: poster,
-                 overview: overview, path: path, magnetProfile: magnetProfile, inSonarr: true,
+                 overview: overview, path: path, magnetProfile: magnetProfile, quality: quality, inSonarr: true,
                  following: following, why: why)
     }
 }
 
 struct AutoEpisode: Codable, Hashable, Identifiable {
+    /// Sonarr's episode id; older NAS versions do not send it.
+    let episodeId: Int?
     let seriesId: Int
     let series: String?
     let season: Int?
@@ -54,6 +60,141 @@ struct AutoEpisode: Codable, Hashable, Identifiable {
     var id: String { "\(seriesId)-\(season ?? -1)-\(episode ?? -1)" }
     var airDate: Date? { airDateUtc.flatMap(AutoDate.parse) }
     var code: String { AutoFormat.code(season, episode) }
+
+    enum CodingKeys: String, CodingKey {
+        case episodeId = "id", seriesId, series, season, episode, title, airDateUtc, hasFile, monitored
+    }
+}
+
+/// One thing Automatic did, tied to its show and episode where it has one.
+struct AutoActivity: Codable, Hashable, Identifiable {
+    let id: Int
+    let at: String?
+    let kind: String
+    let hash: String?
+    let message: String
+    let detail: String
+    let subject: String?
+    let seriesId: Int?
+    let series: String?
+    let season: Int?
+    let episode: Int?
+    let episodeTitle: String?
+    let formats: [String]?
+    let upgrade: Bool?
+
+    var date: Date? { at.flatMap(AutoDate.parse) }
+    var badges: [AutoBadge] { AutoBadge.from(formats ?? []) }
+    var code: String? { episode == nil ? (season.map { String(format: "S%02d", $0) }) : AutoFormat.code(season, episode) }
+
+    enum Category { case library, downloading, refused, problem, control }
+
+    var category: Category {
+        switch kind {
+        case "transferred", "imported", "kept", "settled", "season": return .library
+        case "rejected", "blocklisted", "stalled", "superseded": return kind == "superseded" ? .library : .refused
+        case "stuck", "unreadable", "waiting": return .problem
+        case "transfer":
+            let d = detail.lowercased()
+            return d.contains("could not") || d.contains("without importing") || d.contains("tba") ? .problem : .downloading
+        case "follow", "unfollow", "quality", "paused", "resumed", "login": return .control
+        default: return .downloading
+        }
+    }
+
+    /// The event in plain words, without the release name it is about.
+    var text: String {
+        // "verdict -- reason" is how a decision is written; the reason is what matters.
+        let reason = detail.range(of: " -- ").map { String(detail[$0.upperBound...]) }
+        switch kind {
+        case "held": return "Found a release; checking its files"
+        case "approved": return "Passed the check; downloading"
+        case "rejected": return "Refused: " + (reason ?? detail)
+        case "blocklisted": return "Blocklisted in Sonarr, which takes the next best"
+        case "stalled": return "Dropped: " + (reason ?? detail)
+        case "superseded": return "Removed from the seedbox: a better copy finished"
+        case "imported":
+            return (reason ?? "").contains("as good")
+                ? "Left the seedbox: the library's copy is as good"
+                : "Left the seedbox once it was in the library"
+        case "transferred": return upgrade == true ? "Upgraded in the library" : "In the library"
+        case "transfer": return detail.prefix(1).uppercased() + detail.dropFirst()
+        case "kept": return "Library copy kept: " + detail
+        case "quality": return "New episodes: " + detail
+        case "paused" where subject == nil: return "Automatic paused"
+        case "paused": return "Waiting for Automatic to be resumed"
+        case "waiting": return "Waiting for space on the seedbox"
+        default:
+            let text = reason ?? detail
+            return text.prefix(1).uppercased() + text.dropFirst()
+        }
+    }
+}
+
+struct AutoAttention: Codable, Hashable, Identifiable {
+    let key: String
+    let title: String
+    let detail: String
+    var id: String { key }
+}
+
+struct AutoActivityFeed: Codable {
+    let events: [AutoActivity]
+    let latest: Int
+    let attention: [AutoAttention]
+}
+
+struct AutoEpisodeFile: Codable, Hashable {
+    let quality: String?
+    let formats: [String]?
+    let score: Int?
+    let size: Int64?
+    let path: String?
+    var badges: [AutoBadge] { AutoBadge.from(formats ?? []) }
+}
+
+struct AutoShowEpisode: Codable, Hashable, Identifiable {
+    let id: Int
+    let season: Int?
+    let episode: Int?
+    let title: String?
+    let airDateUtc: String?
+    let monitored: Bool
+    let hasFile: Bool
+    let file: AutoEpisodeFile?
+    let betterUntil: String?
+
+    var airDate: Date? { airDateUtc.flatMap(AutoDate.parse) }
+    var aired: Bool { airDate.map { $0 < Date() } ?? false }
+    var code: String { AutoFormat.code(season, episode) }
+    var lookingUntil: Date? { betterUntil.flatMap(AutoDate.parse) }
+}
+
+struct AutoSeason: Codable, Hashable, Identifiable {
+    let season: Int
+    let episodes: [AutoShowEpisode]
+    var id: Int { season }
+    var title: String { season == 0 ? "Specials" : "Season \(season)" }
+}
+
+struct AutoLevel: Codable, Hashable, Identifiable {
+    let id: String
+    let title: String
+}
+
+struct AutoShowDetail: Codable {
+    let show: AutoShow
+    let profile: String?
+    let levels: [AutoLevel]
+    let seasons: [AutoSeason]
+    let seedbox: [AutoTorrent]
+    let activity: [AutoActivity]
+    let paused: Bool
+}
+
+struct AutoSearchNow: Codable {
+    let taken: String?
+    let message: String
 }
 
 struct AutoTorrent: Codable, Hashable, Identifiable {
@@ -215,6 +356,8 @@ struct AutoSourcesStatus: Codable, Hashable {
 
 struct AutoOverview: Codable {
     let version: String
+    /// Older NAS versions do not say.
+    let paused: Bool?
     let following: [AutoShow]
     let upcoming: [AutoEpisode]
     let seedbox: AutoSeedbox
@@ -390,6 +533,29 @@ struct AutoClient: Sendable {
         try decode(AutoSourcesStatus.self, await request("GET", "v1/sources"))
     }
 
+    func activity(since: Int = 0, limit: Int = 300) async throws -> AutoActivityFeed {
+        try decode(AutoActivityFeed.self, await request("GET", "v1/activity", query: [
+            .init(name: "since", value: String(since)), .init(name: "limit", value: String(limit))], timeout: 60))
+    }
+
+    func show(id: Int) async throws -> AutoShowDetail {
+        try decode(AutoShowDetail.self, await request("GET", "v1/show", query: [.init(name: "id", value: String(id))],
+                                                      timeout: 60))
+    }
+
+    func setPaused(_ paused: Bool) async throws { _ = try await request("POST", "v1/pause", body: ["paused": paused]) }
+
+    /// Searches the indexers there and then, so it can take a while.
+    func searchNow(episodeId: Int) async throws -> AutoSearchNow {
+        try decode(AutoSearchNow.self, await request("POST", "v1/search-now", body: ["episodeId": episodeId],
+                                                     timeout: 300))
+    }
+
+    func setQuality(seriesId: Int, level: String) async throws -> AutoShow {
+        try decode(AutoShow.self, await request("POST", "v1/show-quality", body: ["id": seriesId, "level": level],
+                                                timeout: 60))
+    }
+
     func setSources(_ sites: [AutoSite]) async throws -> AutoSourcesStatus {
         let body: [String: Any] = ["sites": sites.map { ["name": $0.name, "domains": $0.domains] }]
         return try decode(AutoSourcesStatus.self, await request("POST", "v1/sources", body: body))
@@ -542,13 +708,14 @@ final class AutoSourceSync: ObservableObject {
 // MARK: - State behind Automatic mode
 
 enum AutoPane: String, CaseIterable, Identifiable {
-    case following, upcoming, seedbox, blocked, suggestions
+    case following, upcoming, activity, seedbox, blocked, suggestions
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .following: return "Following"
         case .upcoming: return "Coming Up"
+        case .activity: return "Activity"
         case .seedbox: return "Seedbox"
         case .blocked: return "Blocked"
         case .suggestions: return "Suggestions"
@@ -559,6 +726,7 @@ enum AutoPane: String, CaseIterable, Identifiable {
         switch self {
         case .following: return "tv"
         case .upcoming: return "calendar"
+        case .activity: return "list.bullet.rectangle"
         case .seedbox: return "arrow.down.circle"
         case .blocked: return "hand.raised"
         case .suggestions: return "sparkles.tv"
@@ -586,11 +754,22 @@ final class AutomaticModel: ObservableObject {
     @Published var busy: Set<String> = []
     @Published var notice: String?
 
+    @Published var activity: AutoActivityFeed?
+    @Published var activityError: String?
+    /// What needs a person, from the last look at the NAS's activity.
+    @Published var attention: [AutoAttention] = []
+
+    /// The show whose page is open, over whichever pane was showing.
+    @Published var openShowID: Int?
+    @Published var showDetail: AutoShowDetail?
+    @Published var showError: String?
+
     private var poller: Task<Void, Never>?
     private var wantActive = false
     private var visible = true
 
     var health: AutoHealth? { overview?.health }
+    var paused: Bool { overview?.paused == true }
     var configured: Bool { AutoClient.current() != nil }
     var needsSeedboxLogin: Bool { health.map { !$0.seedboxLogin || $0.seedboxBlocked } ?? false }
 
@@ -599,6 +778,7 @@ final class AutomaticModel: ObservableObject {
         switch pane {
         case .following: return o.following.isEmpty ? nil : o.following.count
         case .upcoming: return nil
+        case .activity: return attention.isEmpty ? nil : attention.count
         case .seedbox:
             let ready = o.seedbox.torrents.filter(\.canBringToNAS).count
             return ready > 0 ? ready : nil
@@ -650,10 +830,100 @@ final class AutomaticModel: ObservableObject {
             overview = o
             error = nil
             lastRefresh = Date()
+            if pane == .activity { await loadActivity() }
+            if let id = openShowID { await loadShow(id) }
         } catch is CancellationError {
         } catch {
             guard client.base == Config.automaticBase else { return }
             self.error = error.localizedDescription
+        }
+    }
+
+    func loadActivity() async {
+        guard let client = AutoClient.current() else { return }
+        do {
+            let feed = try await client.activity()
+            activity = feed
+            attention = feed.attention
+            activityError = nil
+        } catch is CancellationError {
+        } catch {
+            activityError = error.localizedDescription
+        }
+    }
+
+    func openShow(_ id: Int?) {
+        guard let id else { return }
+        if openShowID != id { showDetail = nil; showError = nil }
+        openShowID = id
+        Task { await loadShow(id) }
+    }
+
+    func closeShow() {
+        openShowID = nil
+        showDetail = nil
+        showError = nil
+    }
+
+    /// The show a seedbox row or an activity line is about, by its title.
+    func showID(named title: String?) -> Int? {
+        guard let title else { return nil }
+        return overview?.following.first { $0.title == title }?.id
+    }
+
+    func loadShow(_ id: Int) async {
+        guard let client = AutoClient.current() else { return }
+        do {
+            let detail = try await client.show(id: id)
+            guard openShowID == id else { return }
+            showDetail = detail
+            showError = nil
+        } catch is CancellationError {
+        } catch {
+            guard openShowID == id else { return }
+            showError = error.localizedDescription
+        }
+    }
+
+    func setPaused(_ paused: Bool) async {
+        guard let client = AutoClient.current() else { return }
+        busy.insert("pause")
+        defer { busy.remove("pause") }
+        do {
+            try await client.setPaused(paused)
+            await refresh()
+        } catch {
+            notice = "Could not \(paused ? "pause" : "resume") Automatic: \(error.localizedDescription)"
+        }
+    }
+
+    /// Searches for one episode at once: a better copy than the one there is, or any
+    /// copy when there is none. `label` names it in the answer.
+    func searchNow(episodeId: Int, label: String) async {
+        guard let client = AutoClient.current() else { return }
+        let key = "search-\(episodeId)"
+        busy.insert(key)
+        defer { busy.remove(key) }
+        do {
+            let r = try await client.searchNow(episodeId: episodeId)
+            notice = r.taken != nil
+                ? "\(label): took \(r.taken!). It downloads to the seedbox and goes to the NAS when it finishes."
+                : "\(label): \(r.message)."
+            await refresh()
+        } catch {
+            notice = "Could not search for \(label): \(error.localizedDescription)"
+        }
+    }
+
+    func setQuality(_ show: AutoShow, level: String) async {
+        guard let id = show.id, let client = AutoClient.current() else { return }
+        busy.insert("quality-\(id)")
+        defer { busy.remove("quality-\(id)") }
+        do {
+            _ = try await client.setQuality(seriesId: id, level: level)
+            await refresh()
+        } catch {
+            notice = "Could not change \(show.title): \(error.localizedDescription)"
         }
     }
 

@@ -27,12 +27,18 @@ struct AutomaticView: View {
                 Divider().overlay(Theme.hairline)
                 AutoBanners(model: model, openSettings: openSettings)
                 ZStack {
-                    switch model.pane {
-                    case .following: AutoFollowingView(model: model)
-                    case .upcoming: AutoComingUpView(model: model)
-                    case .seedbox: AutoSeedboxView(model: model)
-                    case .blocked: AutoBlockedView(model: model)
-                    case .suggestions: AutoSuggestionsView(model: model)
+                    // A show's page opens over whichever pane it was opened from.
+                    if let id = model.openShowID {
+                        AutoShowPage(model: model, showID: id)
+                    } else {
+                        switch model.pane {
+                        case .following: AutoFollowingView(model: model)
+                        case .upcoming: AutoComingUpView(model: model)
+                        case .activity: AutoActivityView(model: model)
+                        case .seedbox: AutoSeedboxView(model: model)
+                        case .blocked: AutoBlockedView(model: model)
+                        case .suggestions: AutoSuggestionsView(model: model)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -51,7 +57,7 @@ private struct AutoPaneBar: View {
     var body: some View {
         HStack(spacing: 4) {
             ForEach(AutoPane.allCases) { pane in
-                Button { model.pane = pane } label: {
+                Button { model.closeShow(); model.pane = pane } label: {
                     HStack(spacing: 5) {
                         Image(systemName: pane.symbol).font(.system(size: 10.5, weight: .medium))
                         Text(pane.title).font(.system(size: 11.5, weight: .medium))
@@ -68,6 +74,25 @@ private struct AutoPaneBar: View {
             }
             Spacer(minLength: 8)
             AutoHealthLine(model: model)
+            // Only against a NAS that knows how to pause.
+            if model.overview?.paused != nil {
+                if model.busy.contains("pause") {
+                    ProgressView().controlSize(.mini).frame(width: 70)
+                } else {
+                    Button { Task { await model.setPaused(!model.paused) } } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: model.paused ? "play.fill" : "pause.fill").font(.system(size: 9))
+                            Text(model.paused ? "Resume" : "Pause").font(.system(size: 11, weight: .medium))
+                        }
+                        .padding(.horizontal, 9)
+                        .frame(height: 21)
+                    }
+                    .buttonStyle(QBTabButtonStyle(selected: false))
+                    .help(model.paused
+                          ? "Start searching, downloading and copying again"
+                          : "Stop searching for, starting and copying anything new. Downloads under way finish.")
+                }
+            }
         }
         .padding(.horizontal, 12)
         .frame(height: 30)
@@ -80,6 +105,9 @@ private struct AutoHealthLine: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if model.paused {
+                dot("Paused", Tint.warn, help: "Nothing new is searched for, started or copied")
+            }
             if let h = model.health {
                 dot(h.sonarr ? "Sonarr" : (h.streaming == true ? "Sonarr paused for Plex" : "Sonarr not answering"),
                     h.sonarr ? Tint.ok : (h.streaming == true ? Tint.warn : Tint.bad),
@@ -111,8 +139,20 @@ private struct AutoBanners: View {
     @State private var sendError: String?
 
     var body: some View {
-        let show = model.error != nil || model.needsSeedboxLogin || model.notice != nil
+        let copies = model.attention.filter { $0.key.hasPrefix("copy-") }
+        let show = model.error != nil || model.needsSeedboxLogin || model.notice != nil || model.paused
+            || !copies.isEmpty
         VStack(spacing: 8) {
+            if model.paused && model.error == nil {
+                AutoBanner(symbol: "pause.circle",
+                           text: "Automatic is paused. Nothing new is searched for, started or copied to the NAS; downloads already under way finish.",
+                           tint: Tint.warn,
+                           action: model.busy.contains("pause") ? nil : ("Resume", { Task { await model.setPaused(false) } }))
+            }
+            ForEach(copies.prefix(3)) { a in
+                AutoBanner(symbol: "exclamationmark.triangle", text: "\(a.title). \(a.detail)", tint: Tint.bad,
+                           action: ("Show", { model.closeShow(); model.pane = .seedbox }))
+            }
             if let err = model.error {
                 AutoBanner(symbol: "wifi.exclamationmark", text: err, tint: Tint.bad,
                            action: ("Settings\u{2026}", openSettings))
@@ -288,8 +328,13 @@ private struct AutoFollowingView: View {
                     } else {
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                             ForEach(shows, id: \.stableID) { show in
-                                AutoShowCard(show: show)
-                                    .contextMenu { Button("Stop Following") { confirmUnfollow = show } }
+                                Button { model.openShow(show.id) } label: { AutoShowCard(show: show) }
+                                    .buttonStyle(AutoCardButtonStyle())
+                                    .help("Open \(show.title)")
+                                    .contextMenu {
+                                        Button("Open") { model.openShow(show.id) }
+                                        Button("Stop Following") { confirmUnfollow = show }
+                                    }
                             }
                         }
                     }
@@ -352,12 +397,25 @@ private struct AutoShowCard: View {
             AutoPoster(url: show.poster)
             Text(show.title).font(.system(size: 12.5, weight: .semibold)).lineLimit(2)
             nextLine
+            levelLine
             if let why = show.why {
                 Text(why).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
             }
             if let action { action.padding(.top, 2) }
         }
         .frame(width: 140, alignment: .leading)
+    }
+
+    /// Only what differs from the usual: a show that waits for 4K or Dolby Vision, or
+    /// one Magnet's scoring does not cover.
+    @ViewBuilder private var levelLine: some View {
+        if show.quality == "4k" {
+            AutoChip(text: "4K only", tint: Tint.busy)
+        } else if show.quality == "dv" {
+            AutoChip(text: "Dolby Vision only", tint: Tint.check)
+        } else if show.magnetProfile == false && show.why == nil {
+            AutoChip(text: "Not Magnet's scoring", tint: Tint.warn)
+        }
     }
 
     @ViewBuilder private var nextLine: some View {
@@ -425,7 +483,7 @@ private struct AutoComingUpView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(day).font(.system(size: 13, weight: .semibold)).padding(.bottom, 6)
                         ForEach(items) { ep in
-                            AutoEpisodeRow(ep: ep, seedbox: onSeedbox(ep))
+                            AutoEpisodeRow(model: model, ep: ep, seedbox: onSeedbox(ep))
                             Divider().overlay(Theme.hairline)
                         }
                     }
@@ -454,28 +512,41 @@ private struct AutoComingUpView: View {
 }
 
 private struct AutoEpisodeRow: View {
+    @ObservedObject var model: AutomaticModel
     let ep: AutoEpisode
     let seedbox: AutoTorrent?
+
+    /// Aired, followed, and nothing for it yet: the one case a search by hand helps.
+    private var waiting: Bool { !ep.hasFile && seedbox == nil && (ep.airDate.map { $0 < Date() } ?? false) }
 
     var body: some View {
         HStack(spacing: 12) {
             Text(ep.airDate.map(AutoFormat.airTime) ?? "")
                 .font(.system(size: 11.5).monospacedDigit()).foregroundStyle(.secondary)
                 .frame(width: 64, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(ep.series ?? "").font(.system(size: 12.5, weight: .semibold))
-                Text([ep.code, ep.title].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  "))
-                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            Button { model.openShow(ep.seriesId) } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ep.series ?? "").font(.system(size: 12.5, weight: .semibold))
+                    Text([ep.code, ep.title].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  "))
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .help("Open \(ep.series ?? "the show")")
             Spacer(minLength: 12)
             status
+            if waiting, let id = ep.episodeId, !model.paused {
+                AutoSearchButton(model: model, episodeId: id, hasCopy: false,
+                                 label: [ep.series, ep.code].compactMap { $0 }.joined(separator: " "))
+            }
         }
         .padding(.vertical, 7)
     }
 
     @ViewBuilder private var status: some View {
         if ep.hasFile {
-            AutoChip(text: "On the NAS", tint: Tint.ok, symbol: "checkmark")
+            AutoChip(text: "In the library", tint: Tint.ok, symbol: "checkmark")
         } else if let t = seedbox {
             if t.isComplete { AutoChip(text: "On the seedbox", tint: Tint.busy, symbol: "tray.full") }
             else { AutoChip(text: "Downloading \(Int((t.progress ?? 0) * 100))%", tint: Tint.busy, symbol: "arrow.down") }
@@ -546,7 +617,15 @@ private struct AutoTorrentRow: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                if let id = model.showID(named: t.series), model.openShowID != id {
+                    Button { model.openShow(id) } label: {
+                        Text(title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open \(t.series ?? "the show")")
+                } else {
+                    Text(title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                }
                 Text(t.name ?? t.hash).font(.system(size: 10.5)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
                 if !t.badges.isEmpty || t.lookingUntil != nil {
@@ -750,6 +829,546 @@ private struct AutoSuggestionsView: View {
             ProgressView().controlSize(.small)
         } else {
             Button("Follow") { Task { await model.follow(show) } }.controlSize(.small)
+        }
+    }
+}
+
+// MARK: - Shared pieces
+
+/// A card that answers the pointer: a light wash under it, a little dimmer pressed.
+private struct AutoCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        AutoCardBody(configuration: configuration)
+    }
+
+    private struct AutoCardBody: View {
+        let configuration: ButtonStyle.Configuration
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(configuration.isPressed ? 0.09 : hovering ? 0.05 : 0)))
+                .padding(-6)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// Search for one episode at once. With a copy there, only a better one is taken.
+private struct AutoSearchButton: View {
+    @ObservedObject var model: AutomaticModel
+    let episodeId: Int
+    let hasCopy: Bool
+    let label: String
+
+    var body: some View {
+        if model.busy.contains("search-\(episodeId)") {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Searching\u{2026}").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .frame(minWidth: 96)
+        } else {
+            Button(hasCopy ? "Find a Better Copy" : "Search Now") {
+                Task { await model.searchNow(episodeId: episodeId, label: label) }
+            }
+            .controlSize(.small)
+            .help(hasCopy ? "Search the sites now and take a release only if it beats the copy there is"
+                          : "Search the sites now and take the best release there is")
+        }
+    }
+}
+
+private extension AutoActivity.Category {
+    var tint: Color {
+        switch self {
+        case .library: return Tint.ok
+        case .downloading: return Tint.busy
+        case .refused: return Tint.bad
+        case .problem: return Tint.warn
+        case .control: return .secondary
+        }
+    }
+}
+
+private extension AutoActivity {
+    var symbol: String {
+        switch kind {
+        case "transferred": return upgrade == true ? "arrow.up.circle.fill" : "checkmark.circle.fill"
+        case "imported", "superseded": return "tray.and.arrow.up"
+        case "held": return "doc.text.magnifyingglass"
+        case "approved": return "arrow.down.circle"
+        case "rejected", "blocklisted": return "hand.raised.fill"
+        case "stalled", "stuck": return "pause.circle"
+        case "transfer": return category == .problem ? "exclamationmark.triangle.fill" : "arrow.right.circle"
+        case "kept", "settled": return "checkmark.seal"
+        case "season": return "folder"
+        case "follow": return "plus.circle"
+        case "unfollow": return "minus.circle"
+        case "quality": return "slider.horizontal.3"
+        case "paused": return subject == nil ? "pause.fill" : "pause.circle"
+        case "resumed": return "play.fill"
+        case "login": return "key"
+        default: return "circle"
+        }
+    }
+}
+
+/// One line of history: when, what, and the release it was about.
+private struct AutoActivityLine: View {
+    let e: AutoActivity
+    /// What the line is about, before what happened: the episode code on a show's
+    /// page; nothing inside an episode's own card.
+    var label: String? = nil
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(e.date.map(AutoFormat.airTime) ?? "")
+                .font(.system(size: 10.5).monospacedDigit()).foregroundStyle(.tertiary)
+                .frame(width: 52, alignment: .leading)
+            Image(systemName: e.symbol).font(.system(size: 11)).foregroundStyle(e.category.tint)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if let label {
+                        Text(label).font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                    }
+                    Text(e.text).font(.system(size: 11.5))
+                        .foregroundStyle(e.category == .refused ? Tint.bad : .primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if e.kind == "transferred" && !e.badges.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(e.badges, id: \.self) { b in AutoChip(text: b.text, tint: b.isDV ? Tint.check : .secondary) }
+                    }
+                }
+                if let subject = e.subject, !subject.isEmpty, e.category != .control {
+                    Text(subject).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+private extension Array where Element == String {
+    var nonEmptyJoined: String? {
+        let s = filter { !$0.isEmpty }.joined(separator: " ")
+        return s.isEmpty ? nil : s
+    }
+}
+
+// MARK: - Activity
+
+/// An episode's history, or one event that belongs to no episode.
+private struct AutoStory: Identifiable {
+    let id: String
+    let seriesId: Int?
+    let title: String
+    let subtitle: String?
+    let events: [AutoActivity]        // newest first
+
+    var latest: AutoActivity { events[0] }
+
+    /// Episode by episode, the most recent first; what belongs to none stands alone.
+    static func group(_ events: [AutoActivity]) -> [AutoStory] {
+        var order: [String] = []
+        var bucket: [String: [AutoActivity]] = [:]
+        for e in events {
+            let key: String
+            if let sid = e.seriesId, let season = e.season {
+                key = "s\(sid)-\(season)-\(e.episode.map(String.init) ?? "pack")"
+            } else {
+                key = "e\(e.id)"
+            }
+            if bucket[key] == nil { order.append(key) }
+            bucket[key, default: []].append(e)
+        }
+        return order.map { key in
+            let evs = bucket[key]!
+            let e = evs[0]
+            let title = [e.series, e.code].compactMap { $0 }.nonEmptyJoined
+                ?? (e.category == .control ? "Automatic" : e.subject ?? "Automatic")
+            return AutoStory(id: key, seriesId: e.seriesId, title: title,
+                             subtitle: evs.lazy.compactMap(\.episodeTitle).first, events: evs)
+        }
+    }
+
+    enum State { case library, upgraded, working, refused, problem, note }
+
+    var state: State {
+        if events.contains(where: { $0.kind == "transferred" && $0.upgrade == true }) { return .upgraded }
+        if events.contains(where: { $0.kind == "transferred" }) { return .library }
+        switch latest.category {
+        case .problem: return .problem
+        case .refused: return events.contains(where: { $0.kind == "approved" }) ? .working : .refused
+        case .downloading: return .working
+        case .library: return .library
+        case .control: return .note
+        }
+    }
+}
+
+private struct AutoActivityView: View {
+    @ObservedObject var model: AutomaticModel
+    @State private var filter: Filter = .all
+    @AppStorage("automatic.activity.filter") private var savedFilter = Filter.all.rawValue
+
+    enum Filter: String, CaseIterable, Identifiable {
+        case all = "All", library = "In the library", refused = "Refused", problems = "Problems"
+        var id: String { rawValue }
+    }
+
+    private var stories: [AutoStory] {
+        let all = AutoStory.group(model.activity?.events ?? [])
+        switch filter {
+        case .all: return all
+        case .library: return all.filter { [.library, .upgraded].contains($0.state) && $0.seriesId != nil }
+        case .refused: return all.filter { $0.events.contains { $0.category == .refused } }
+        case .problems: return all.filter { $0.events.contains { $0.category == .problem } }
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .bottom, spacing: 16) {
+                    AutoHeader(title: "Activity",
+                               subtitle: "Everything Automatic has done, episode by episode: releases found and refused, downloads, better copies, and what reached the library.")
+                    Picker("Show", selection: $filter) {
+                        ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+                if model.activity == nil {
+                    if let err = model.activityError {
+                        AutoBanner(symbol: "exclamationmark.triangle", text: err, tint: Tint.bad,
+                                   action: ("Try Again", { Task { await model.loadActivity() } }))
+                    } else {
+                        ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(40)
+                    }
+                } else if stories.isEmpty {
+                    AutoEmpty(symbol: "list.bullet.rectangle", title: filter == .all ? "Nothing yet" : "Nothing here",
+                              message: filter == .all
+                                ? "Releases found, downloads and arrivals in the library appear here as they happen."
+                                : "Nothing in the history so far matches \u{201C}\(filter.rawValue)\u{201D}.")
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(stories) { story in AutoStoryCard(model: model, story: story) }
+                    }
+                }
+            }
+            .padding(24)
+        }
+        .onAppear { filter = Filter(rawValue: savedFilter) ?? .all }
+        .onChange(of: filter) { _, f in savedFilter = f.rawValue }
+        .task { await model.loadActivity() }
+    }
+}
+
+private struct AutoStoryCard: View {
+    @ObservedObject var model: AutomaticModel
+    let story: AutoStory
+    @State private var expanded = false
+    private let shown = 4
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                if let sid = story.seriesId {
+                    Button { model.openShow(sid) } label: { heading }
+                        .buttonStyle(.plain).help("Open the show")
+                } else {
+                    heading
+                }
+                Spacer(minLength: 10)
+                chip
+                if let d = story.latest.date {
+                    Text(AutoFormat.relativeDay(d)).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            if story.events.count > 1 || story.seriesId != nil {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(expanded ? story.events : Array(story.events.prefix(shown))) { e in
+                        AutoActivityLine(e: e)
+                    }
+                }
+                if story.events.count > shown {
+                    Button(expanded ? "Show less" : "Show all \(story.events.count)") { expanded.toggle() }
+                        .buttonStyle(.link).font(.system(size: 10.5))
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline))
+    }
+
+    private var heading: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if story.seriesId == nil {
+                Image(systemName: story.latest.symbol).foregroundStyle(story.latest.category.tint)
+            }
+            Text(story.seriesId == nil && story.events.count == 1
+                 ? [story.latest.subject, story.latest.text].compactMap { $0 }.joined(separator: " \u{00B7} ")
+                 : story.title)
+                .font(.system(size: 13, weight: .semibold))
+            if let sub = story.subtitle, !sub.isEmpty {
+                Text(sub).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+
+    @ViewBuilder private var chip: some View {
+        switch story.state {
+        case .upgraded: AutoChip(text: "Upgraded", tint: Tint.check, symbol: "arrow.up")
+        case .library: AutoChip(text: "In the library", tint: Tint.ok, symbol: "checkmark")
+        case .working: AutoChip(text: "In progress", tint: Tint.busy, symbol: "arrow.down")
+        case .refused: AutoChip(text: "Refused", tint: Tint.bad, symbol: "hand.raised")
+        case .problem: AutoChip(text: "Needs a look", tint: Tint.warn, symbol: "exclamationmark.triangle")
+        case .note: EmptyView()
+        }
+    }
+}
+
+// MARK: - A show
+
+private struct AutoShowPage: View {
+    @ObservedObject var model: AutomaticModel
+    let showID: Int
+    @State private var confirmUnfollow = false
+    @State private var opened: Set<Int>?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                Button { model.closeShow() } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
+                        Text(model.pane.title)
+                    }
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+
+                if let d = model.showDetail, d.show.id == showID {
+                    header(d)
+                    quality(d)
+                    if !d.seedbox.isEmpty { seedbox(d) }
+                    seasons(d)
+                    if !d.activity.isEmpty { history(d) }
+                } else if let err = model.showError {
+                    AutoBanner(symbol: "exclamationmark.triangle", text: err, tint: Tint.bad,
+                               action: ("Try Again", { Task { await model.loadShow(showID) } }))
+                } else {
+                    ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(60)
+                }
+            }
+            .padding(24)
+        }
+        .confirmationDialog("Stop following \(model.showDetail?.show.title ?? "")?", isPresented: $confirmUnfollow) {
+            Button("Stop Following", role: .destructive) {
+                if let s = model.showDetail?.show {
+                    Task { await model.unfollow(s); model.closeShow() }
+                }
+            }
+        } message: {
+            Text("New episodes stop downloading. Nothing already downloaded is deleted.")
+        }
+    }
+
+    // MARK: Header
+
+    private func header(_ d: AutoShowDetail) -> some View {
+        let eps = d.seasons.filter { $0.season > 0 }.flatMap(\.episodes)
+        let aired = eps.filter(\.aired).count
+        let held = eps.filter(\.hasFile).count
+        return HStack(alignment: .top, spacing: 20) {
+            AutoPoster(url: d.show.poster, width: 128)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(d.show.title).font(.system(size: 24, weight: .bold))
+                Text([d.show.year.flatMap { $0 > 0 ? String($0) : nil }, d.show.network, d.show.status?.capitalized]
+                        .compactMap { $0 }.joined(separator: " \u{00B7} "))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                if let next = d.show.nextDate {
+                    Text("Next episode \(AutoFormat.relativeDay(next)), \(AutoFormat.airTime(next))")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                if let o = d.show.overview, !o.isEmpty {
+                    Text(o).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(4)
+                        .frame(maxWidth: 560, alignment: .leading)
+                }
+                HStack(spacing: 8) {
+                    AutoChip(text: "\(held) of \(aired) aired episodes in the library",
+                             tint: held >= aired && aired > 0 ? Tint.ok : .secondary, symbol: "film.stack")
+                    if d.show.monitored == true {
+                        Button("Stop Following", role: .destructive) { confirmUnfollow = true }.controlSize(.small)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    // MARK: Quality
+
+    private static let levelNames = ["first": "First good copy", "4k": "4K only", "dv": "Dolby Vision only"]
+    private static let levelHelp = [
+        "first": "Takes the first good copy as soon as one exists, then a better one for a week, Dolby Vision first.",
+        "4k": "Waits for a 4K release: nothing below 4K downloads, however long that takes.",
+        "dv": "Waits for a Dolby Vision release: nothing without it downloads, however long that takes.",
+    ]
+
+    private func quality(_ d: AutoShowDetail) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("New episodes").font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 10) {
+                Picker("New episodes", selection: Binding(
+                    get: { d.show.quality ?? "" },
+                    set: { level in Task { await model.setQuality(d.show, level: level) } })) {
+                    ForEach(d.levels) { l in Text(Self.levelNames[l.id] ?? l.title).tag(l.id) }
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .disabled(model.busy.contains("quality-\(showID)"))
+                if model.busy.contains("quality-\(showID)") { ProgressView().controlSize(.small) }
+            }
+            Text(d.show.quality.flatMap { Self.levelHelp[$0] }
+                 ?? "Uses Sonarr's \u{201C}\(d.profile ?? "own")\u{201D} profile, so Magnet's scoring does not apply. Choose one to switch it to Magnet's.")
+                .font(.system(size: 11)).foregroundStyle(d.show.quality == nil ? Tint.warn : .secondary)
+        }
+    }
+
+    // MARK: Seedbox
+
+    private func seedbox(_ d: AutoShowDetail) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("On the seedbox").font(.system(size: 13, weight: .semibold))
+            VStack(spacing: 0) {
+                ForEach(d.seedbox) { t in
+                    AutoTorrentRow(model: model, t: t, failure: nil)
+                    Divider().overlay(Theme.hairline)
+                }
+            }
+        }
+    }
+
+    // MARK: Seasons
+
+    private func seasons(_ d: AutoShowDetail) -> some View {
+        let open = opened ?? Set(d.seasons.prefix(1).map(\.season))
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(d.seasons) { season in
+                let held = season.episodes.filter(\.hasFile).count
+                DisclosureGroup(isExpanded: Binding(
+                    get: { open.contains(season.season) },
+                    set: { on in
+                        var next = open
+                        if on { next.insert(season.season) } else { next.remove(season.season) }
+                        opened = next
+                    })) {
+                    VStack(spacing: 0) {
+                        ForEach(season.episodes) { ep in
+                            AutoShowEpisodeRow(model: model, ep: ep, show: d.show.title,
+                                               seedbox: d.seedbox.first {
+                                                   $0.season == ep.season && $0.episode == ep.episode && $0.verdict != "rejected"
+                                               },
+                                               paused: d.paused)
+                            Divider().overlay(Theme.hairline)
+                        }
+                    }
+                    .padding(.top, 4)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(season.title).font(.system(size: 13, weight: .semibold))
+                        Text("\(held) of \(season.episodes.count) in the library")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: History
+
+    private func history(_ d: AutoShowDetail) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Recent activity").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button("All Activity") { model.closeShow(); model.pane = .activity }
+                    .buttonStyle(.link).font(.system(size: 11))
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(d.activity.prefix(15)) { e in AutoActivityLine(e: e, label: e.code) }
+            }
+        }
+    }
+}
+
+private struct AutoShowEpisodeRow: View {
+    @ObservedObject var model: AutomaticModel
+    let ep: AutoShowEpisode
+    let show: String
+    let seedbox: AutoTorrent?
+    let paused: Bool
+    @State private var hovering = false
+
+    /// Aired and missing while still followed: always worth a button.
+    private var waiting: Bool { ep.aired && !ep.hasFile && seedbox == nil && ep.monitored }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(ep.episode.map { String(format: "E%02d", $0) } ?? "")
+                .font(.system(size: 11.5, weight: .medium).monospacedDigit()).foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ep.title?.isEmpty == false ? ep.title! : "TBA").font(.system(size: 12.5))
+                HStack(spacing: 8) {
+                    if let d = ep.airDate {
+                        Text(d.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                    }
+                    if let until = ep.lookingUntil {
+                        Text("Looking for a better copy until \(AutoFormat.relativeDay(until))")
+                            .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Spacer(minLength: 12)
+            status
+            if ep.aired && !paused && (waiting || hovering || model.busy.contains("search-\(ep.id)")) {
+                AutoSearchButton(model: model, episodeId: ep.id, hasCopy: ep.hasFile, label: "\(show) \(ep.code)")
+            }
+        }
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder private var status: some View {
+        if let f = ep.file {
+            HStack(spacing: 4) {
+                ForEach(f.badges.prefix(3), id: \.self) { b in AutoChip(text: b.text, tint: b.isDV ? Tint.check : .secondary) }
+                if f.badges.isEmpty, let q = f.quality { AutoChip(text: q) }
+                AutoChip(text: "In the library", tint: Tint.ok, symbol: "checkmark")
+                    .help([f.path, f.size.map { AutoFormat.bytes($0) }].compactMap { $0 }.joined(separator: " \u{00B7} "))
+            }
+        } else if let t = seedbox {
+            if t.isComplete { AutoChip(text: "On the seedbox", tint: Tint.busy, symbol: "tray.full") }
+            else { AutoChip(text: "Downloading \(Int((t.progress ?? 0) * 100))%", tint: Tint.busy, symbol: "arrow.down") }
+        } else if waiting {
+            AutoChip(text: "Aired, waiting for a release", tint: Tint.warn, symbol: "clock")
+        } else if !ep.aired {
+            AutoChip(text: "Not aired yet")
+        } else {
+            AutoChip(text: "Not in the library").opacity(0.7)
         }
     }
 }

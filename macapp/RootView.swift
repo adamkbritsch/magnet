@@ -88,6 +88,15 @@ struct RootView: View {
             started = true
             web.onLoadFailure = { _ in }
             bookmarks.start()
+            // Automatic's notifications: looked for whichever mode is showing, and a
+            // click opens Automatic at the show it is about.
+            AutoNotifier.shared.onAttention = { automatic.attention = $0 }
+            AutoNotifier.shared.onOpen = { show in
+                NSApp.activate(ignoringOtherApps: true)
+                NotificationCenter.default.post(name: .qbModeAutomatic, object: nil)
+                if let show { automatic.openShow(show) } else { automatic.closeShow(); automatic.pane = .activity }
+            }
+            AutoNotifier.shared.start()
             // After the bar is read, never before: sent earlier, the list would hold only
             // the hand-added sites, and the NAS would stop searching all the others.
             syncSources()
@@ -276,16 +285,23 @@ struct RootView: View {
                     Task { await routes.resolve(); applyRoute() }
                 } onSettings: { showSettings = true }
             case .live:
-                ZStack {
-                    WebPane(controller: web, generation: generation)
-                    if web.isChallenged {
-                        Theme.surface
-                        VStack(spacing: 12) {
-                            ProgressView().controlSize(.small)
-                            Text("Clearing Cloudflare's check…")
-                                .font(.system(size: 12)).foregroundStyle(.secondary)
-                            Text("The site shows an empty page while this runs.")
-                                .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                VStack(spacing: 0) {
+                    if let note = routes.note {
+                        RouteNoteBar(text: note, onCheck: {
+                            Task { await routes.resolve(); applyRoute() }
+                        }, onDismiss: { routes.dismissNote() })
+                    }
+                    ZStack {
+                        WebPane(controller: web, generation: generation)
+                        if web.isChallenged {
+                            Theme.surface
+                            VStack(spacing: 12) {
+                                ProgressView().controlSize(.small)
+                                Text("Clearing Cloudflare's check…")
+                                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                                Text("The site shows an empty page while this runs.")
+                                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                            }
                         }
                     }
                 }
@@ -435,6 +451,7 @@ private struct ProxyTriggers: ViewModifier {
         content
             .onChange(of: settings.proxyHost) { _, _ in schedule() }
             .onChange(of: settings.proxyPort) { _, _ in schedule() }
+            .onChange(of: settings.proxyHomeHost) { _, _ in schedule() }
     }
 
     private func schedule() {
@@ -1268,6 +1285,16 @@ private struct AutomaticTab: View {
                     }
                 }
 
+                SettingRow(label: "Notifications",
+                           hint: "Shown by macOS while Magnet is open, whichever mode is showing; Magnet looks at the NAS every two minutes. Clicking one opens the show it is about.") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("When a new episode is ready in the library", isOn: $settings.notifyArrived)
+                        Toggle("When a better copy replaces one", isOn: $settings.notifyUpgraded)
+                        Toggle("When something needs me", isOn: $settings.notifyAttention)
+                    }
+                    .toggleStyle(.checkbox).font(.system(size: 12))
+                }
+
                 Divider()
 
                 SettingRow(label: "Where it searches",
@@ -1545,6 +1572,11 @@ private struct ConnectionTab: View {
                                                 set: { settings.proxyPort = Int($0) ?? settings.proxyPort }),
                                   width: 70)
                     }
+                }
+
+                SettingRow(label: "At home (optional)",
+                           hint: "The same proxy's address on your home network, used when the address above does not answer -- say the NAS has dropped off Tailscale. Sites still load only through the proxy, never directly.") {
+                    MonoField(placeholder: "home network address", text: $settings.proxyHomeHost)
                 }
 
                 SettingRow(label: "Proxy sign-in",
@@ -2109,4 +2141,28 @@ private struct CredentialSheet: View {
 
 private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+/// A line over the browser for something worth knowing while sites still load: the
+/// proxy is reached by its home address, or its Tailscale sign-in expires soon.
+private struct RouteNoteBar: View {
+    let text: String
+    let onCheck: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.orange)
+            Text(text).font(.system(size: 11.5)).foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("Check Again", action: onCheck).controlSize(.small)
+            Button { onDismiss() } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }
+                .buttonStyle(.plain).foregroundStyle(.secondary).help("Hide until the route is checked again")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(Theme.orange.opacity(0.12))
+        .overlay(alignment: .bottom) { Divider().overlay(Theme.hairline) }
+    }
 }

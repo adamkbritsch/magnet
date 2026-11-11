@@ -68,8 +68,21 @@ enum ProxyCredentialStore {
 /// fine through the proxy seconds later. There is no direct route any more, so a
 /// direct probe measures a path the app never uses.
 enum ProxyRoute {
+    /// The address the last route check settled on: the proxy's own, or its home one.
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var chosen: String?
+
+    nonisolated static func use(_ host: String?) {
+        lock.lock(); chosen = host; lock.unlock()
+    }
+
+    nonisolated static var host: String {
+        lock.lock(); defer { lock.unlock() }
+        return chosen ?? Config.proxyHost
+    }
+
     nonisolated static func configurations() -> [ProxyConfiguration] {
-        let host = Config.proxyHost
+        let host = Self.host
         guard !host.isEmpty else { return [] }
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host),
                                            port: NWEndpoint.Port(rawValue: Config.proxyPort) ?? 8888)
@@ -100,6 +113,9 @@ final class RouteStore: ObservableObject {
     }
 
     @Published private(set) var status: Status = .probing
+    /// Worth knowing while sites still load: the proxy is reached by its home address
+    /// because the usual one is not answering, or its Tailscale sign-in expires soon.
+    @Published private(set) var note: String?
     @Published private(set) var active: X1337Route = .viaNAS
     @Published var proxyHost: String
     @Published var proxyPort: UInt16
@@ -131,8 +147,9 @@ final class RouteStore: ObservableObject {
         }
     }
 
-    private func nasReachable() async -> Bool {
-        let host = proxyHost
+    func dismissNote() { note = nil }
+
+    private func nasReachable(_ host: String) async -> Bool {
         let port = proxyPort
         return await withCheckedContinuation { cont in
             let conn = NWConnection(
@@ -169,15 +186,27 @@ final class RouteStore: ObservableObject {
                               + "Connection and set the NAS address.")
             return
         }
-        if await nasReachable() {
+        note = nil
+        if await nasReachable(proxyHost) {
+            ProxyRoute.use(proxyHost)
             active = .viaNAS
             status = .live(.viaNAS)
+            note = Tailnet.warning(await Tailnet.report(for: proxyHost))
             return
         }
-        // No fallback by design. Failing here is a NAS or tailnet problem to fix,
-        // and quietly browsing around it would hide that while dropping the tunnel.
-        status = .offline("The NAS proxy at \(proxyHost):\(proxyPort) is not answering. "
-                          + "Sites load only through it.")
+        // Never around the proxy: browsing direct would drop the tunnel. The same
+        // proxy by its home address is still the tunnel, and says why it is in use.
+        let report = await Tailnet.report(for: proxyHost)
+        let home = Config.proxyHomeHost
+        if !home.isEmpty, home != proxyHost, await nasReachable(home) {
+            ProxyRoute.use(home)
+            active = .viaNAS
+            status = .live(.viaNAS)
+            note = "Using the NAS's home address, \(home). " + Tailnet.explain(report, host: proxyHost, port: proxyPort)
+            return
+        }
+        ProxyRoute.use(nil)
+        status = .offline(Tailnet.explain(report, host: proxyHost, port: proxyPort))
     }
 
     /// The proxy settings to hand WKWebsiteDataStore for the active route.
