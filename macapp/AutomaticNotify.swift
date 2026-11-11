@@ -18,6 +18,9 @@ final class AutoNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     private var task: Task<Void, Never>?
     private var asked = false
+    /// When the NAS first could not name an arrival; after half an hour it is
+    /// announced as it is, so one that can never be named does not hold up the rest.
+    private var unnamedSince: Date?
     private let interval: Duration = .seconds(120)
     private let lastKey = "automatic.notify.lastEvent"
     private let attentionKey = "automatic.notify.attention"
@@ -51,11 +54,22 @@ final class AutoNotifier: NSObject, UNUserNotificationCenterDelegate {
             _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
         }
         let known = Set(d.stringArray(forKey: attentionKey) ?? [])
+        // While Sonarr cannot answer (paused for a Plex stream, say) the NAS cannot name
+        // the episodes, nor tell an upgrade from an arrival: look again later rather
+        // than announce "an episode" now and lose the real news.
+        var unnamed = feed.events.contains { $0.kind == "transferred" && $0.seriesId == nil }
+        if unnamed {
+            let since = unnamedSince ?? Date()
+            unnamedSince = since
+            if Date().timeIntervalSince(since) > 30 * 60 { unnamed = false }
+        }
+        if !unnamed { unnamedSince = nil }
         defer {
-            d.set(feed.latest, forKey: lastKey)
+            if !unnamed || last == 0 { d.set(feed.latest, forKey: lastKey) }
             d.set(feed.attention.map(\.key), forKey: attentionKey)
         }
         guard last > 0 else { return }              // first look: nothing before now is news
+        if unnamed { return }
         for e in feed.events.reversed() where e.kind == "transferred" {
             let what = [e.series, e.code].compactMap { $0 }.joined(separator: " ")
             let quality = e.badges.map(\.text).joined(separator: " \u{00B7} ")
