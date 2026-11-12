@@ -177,6 +177,13 @@ folder open on the other.
 
 - **Seedbox → NAS** copies run entirely on the NAS, so this Mac can sleep or travel.
 - **To or from this Mac**, transfers pass through the app.
+- **Direct Download to This Mac** (right-click anything on the NAS side, in the list or the
+  folder tree) copies it straight here: into the folder the other pane shows when that is
+  this Mac, otherwise into Downloads. A name already taken gets a number beside it, the way
+  a browser download does. Like every transfer to this Mac it goes through the relay over
+  Tailscale, which runs over whichever network macOS puts first. For Ethernet to win
+  whenever a cable is in, with Wi-Fi as the fallback, put every wired service above Wi-Fi
+  in System Settings → Network → ⋯ → Set Service Order.
 - You can also move, replace, delete, make folders (on the NAS and this Mac), bulk-rename
   (on the NAS and this Mac), search either side, keep favorites, check a finished copy's
   file count, and read a transfer's log.

@@ -117,6 +117,8 @@ struct DirTreeView: View {
     var onRename: (Entry) -> Void = { _ in }
     var onDelete: (Entry) -> Void = { _ in }
     var onNewFolder: (String) -> Void = { _ in }
+    /// NAS side only: copy this folder straight to this Mac.
+    var onDownloadToMac: ((Entry) -> Void)? = nil
 
     var body: some View {
         ScrollView {
@@ -178,6 +180,13 @@ struct DirTreeView: View {
             // A single click navigates the file list, matching FileZilla's tree.
             .onTapGesture { Task { await browse.go(to: path) } }
             .contextMenu {
+                // Inside a volume, like the list's rows: a whole volume is not a download.
+                if let onDownloadToMac, browse.backend.kind == .nas, depth >= 2 {
+                    Button("Direct Download to This Mac") {
+                        onDownloadToMac(Entry(name: name, path: path, isDir: true, size: nil, mtime: nil))
+                    }
+                    Divider()
+                }
                 if browse.mode == .seedbox {
                     Button(destinationName.isEmpty
                            ? "Add Folder to Queue"

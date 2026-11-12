@@ -27,6 +27,7 @@ struct BrowsePane: View {
     var replacingName: String? = nil
     var onReplaceWith: (Entry) -> Void = { _ in }
     var onMoveToFolder: ([Entry]) -> Void = { _ in }
+    var onDownloadToMac: (([Entry]) -> Void)? = nil
     var isFavorite: (String) -> Bool = { _ in false }
     var onToggleFavorite: (Entry) -> Void = { _ in }
     var onFavoriteCurrentFolder: () -> Void = { }
@@ -98,6 +99,7 @@ struct BrowsePane: View {
                           replacingName: replacingName,
                           onReplaceWith: onReplaceWith,
                           onMoveToFolder: onMoveToFolder,
+                          onDownloadToMac: onDownloadToMac,
                           isFavorite: isFavorite,
                           onToggleFavorite: onToggleFavorite,
                           onFavoriteCurrentFolder: onFavoriteCurrentFolder,

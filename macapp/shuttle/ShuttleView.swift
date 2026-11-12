@@ -556,6 +556,7 @@ struct ShuttleView: View {
                                replacingName: replacing?.name,
                                onReplaceWith: { confirmReplace(with: $0) },
                                onMoveToFolder: { beginMoveToFolder($0, in: browse, tree: tree) },
+                               onDownloadToMac: { downloadToMac($0, from: browse) },
                                isFavorite: { favs.contains($0) },
                                onToggleFavorite: { favs.toggle($0) },
                                onFavoriteCurrentFolder: {
@@ -585,7 +586,8 @@ struct ShuttleView: View {
                     destinationName: destinationLabel,
                     onRename: { beginRename($0, in: browse, tree: tree) },
                     onDelete: { beginDelete([$0], in: browse, tree: tree) },
-                    onNewFolder: { beginNewFolder($0) })
+                    onNewFolder: { beginNewFolder($0) },
+                    onDownloadToMac: { downloadToMac([$0], from: browse) })
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous).fill(ShuttleTheme.listFill)
             )
@@ -846,6 +848,31 @@ struct ShuttleView: View {
             }
             tab = .queued
         }
+    }
+
+    /// NAS items straight to this Mac: into the folder the Mac pane shows when the
+    /// other pane is the Mac, else Downloads. This process pulls them through the
+    /// relay like any transfer to the Mac -- over Tailscale, which rides on whichever
+    /// network macOS puts first. A name already taken there gets a number beside it,
+    /// the way a browser download does, so nothing is asked and nothing overwritten.
+    private func downloadToMac(_ items: [Entry], from pane: BrowseStore) {
+        let other = pane === dest ? seedbox : dest
+        let folder = other.kind == .mac ? other.path
+            : (FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path
+               ?? NSHomeDirectory() + "/Downloads")
+        for e in items {
+            let ext = e.isDir ? "" : (e.name as NSString).pathExtension
+            let stem = ext.isEmpty ? e.name : (e.name as NSString).deletingPathExtension
+            var name = e.name
+            var n = 1
+            while FileManager.default.fileExists(atPath: (folder as NSString).appendingPathComponent(name)) {
+                name = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
+                n += 1
+            }
+            local.send(src: e.path, srcName: e.name, destDir: folder,
+                       destName: name == e.name ? nil : name, onConflict: .rename, direction: .download)
+        }
+        tab = .queued
     }
 
     /// Queue one item, on whichever engine owns the destination.

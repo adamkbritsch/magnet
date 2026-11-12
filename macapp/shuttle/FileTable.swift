@@ -92,6 +92,8 @@ struct FileTable: View {
     var onReplaceWith: (Entry) -> Void = { _ in }
     /// NAS side only: move these into a folder here, existing or new.
     var onMoveToFolder: ([Entry]) -> Void = { _ in }
+    /// NAS side only: copy these straight to this Mac.
+    var onDownloadToMac: (([Entry]) -> Void)? = nil
     /// Whether a path is already saved, so the menu item can say which way it goes
     /// rather than making you find out by clicking.
     var isFavorite: (String) -> Bool = { _ in false }
@@ -320,6 +322,11 @@ struct FileTable: View {
         if items.isEmpty {
             backgroundMenu
         } else {
+            // From the NAS, wherever the panes point: one step to this Mac.
+            if let onDownloadToMac, browse.backend.kind == .nas, rowsAreActionable {
+                Button("Direct Download to This Mac") { onDownloadToMac(items) }
+                Divider()
+            }
             if browse.mode == .seedbox, rowsAreActionable {
                 Button(addLabel(items)) { onAddToQueue(items) }
                 // Movies whose useful metadata lives on the folder, not the file:
