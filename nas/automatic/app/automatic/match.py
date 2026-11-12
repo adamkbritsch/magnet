@@ -265,9 +265,16 @@ class SeasonMatch:
         """Have Sonarr put the ordered episode from `path` in the library in place of
         its file. A manual import: the scan the automatic copy uses would keep the
         library's file, which Sonarr rates as good."""
-        items = self.sonarr.get("manualimport", folder=path, seriesId=order["series"],
-                                filterExistingFiles="false") or []
-        found = [it for it in items if order["episodeId"] in [e.get("id") for e in it.get("episodes") or []]
+        # Folder only: given a series without a download id, Sonarr lists that
+        # series' library files instead of reading the folder.
+        try:
+            items = self.sonarr.get("manualimport", folder=path, filterExistingFiles="false") or []
+        except SonarrError as e:
+            if "unreachable" in str(e):
+                raise
+            raise ValueError(f"Sonarr could not read the download: {str(e)[:160]}") from None
+        found = [it for it in items if (it.get("series") or {}).get("id") == order["series"]
+                 and order["episodeId"] in [e.get("id") for e in it.get("episodes") or []]
                  and not any("sample" in str(r).lower() for r in it.get("rejections") or [])]
         if not found:
             raise ValueError("Sonarr did not find the episode in it")

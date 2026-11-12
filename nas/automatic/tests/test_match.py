@@ -113,9 +113,9 @@ class Matching(Harness):
         self.gate.poll()
         folder = "/seedbox/downloads/tv-sonarr/" + self.qb.torrents[h]["name"]
         self.sn.manual[folder] = [
-            {"path": folder + "/Sample/sample.mkv", "episodes": [{"id": 7}], "size": 1000,
+            {"path": folder + "/Sample/sample.mkv", "series": {"id": 9}, "episodes": [{"id": 7}], "size": 1000,
              "rejections": [{"reason": "Sample", "type": "permanent"}]},
-            {"path": folder + "/Show.S01E07.1080p.WEB.H264-CAKES.mkv", "episodes": [{"id": 7}], "size": GB,
+            {"path": folder + "/Show.S01E07.1080p.WEB.H264-CAKES.mkv", "series": {"id": 9}, "episodes": [{"id": 7}], "size": GB,
              "quality": WEB, "languages": [{"id": 1, "name": "English"}], "releaseGroup": "CAKES",
              "rejections": SET_ASIDE}]
         return h
@@ -224,6 +224,32 @@ class Matching(Harness):
         self.api.auto_transfer()
         self.assertEqual(self.commands("ManualImport"), [])
         self.assertIn("did not find the episode", self.store.transfers()[0]["message"])
+
+    def test_sonarr_refusing_to_read_the_download_is_a_failed_copy_not_a_silent_retry(self):
+        self.api.season_match(9, 1)
+        self.grabbed()
+        folder = next(iter(self.sn.manual))
+        self.sn.manual[folder] = {"message": "boom"}       # the fake answers 200 with a dict
+        orig = self.match.sonarr.get
+
+        def broken(path, **params):
+            if path == "manualimport":
+                from automatic.sonarr import SonarrError
+                raise SonarrError("GET manualimport: 500 File doesn't exist")
+            return orig(path, **params)
+        self.match.sonarr.get = broken
+        self.api.auto_transfer()
+        self.assertEqual(self.store.transfers()[0]["status"], "failed")
+        self.assertIn("could not read the download", self.store.transfers()[0]["message"])
+
+    def test_a_download_of_another_show_is_not_imported_for_it(self):
+        self.api.season_match(9, 1)
+        self.grabbed()
+        folder = next(iter(self.sn.manual))
+        for it in self.sn.manual[folder]:
+            it["series"] = {"id": 99}
+        self.api.auto_transfer()
+        self.assertEqual(self.commands("ManualImport"), [])
 
     def test_a_file_already_there_before_the_copy_is_not_taken_for_it(self):
         self.api.season_match(9, 1)

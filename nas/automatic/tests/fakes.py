@@ -241,6 +241,10 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
             return self._json([dict(s.episodes.get(i, {}), id=i, hasFile=i in s.has_file, monitored=i not in s.unmonitored)
                                for i in ids])
         if path == "/api/v3/manualimport":
+            # Sonarr's quirk: a series without a download id lists the series' own
+            # files, and fails on any missing from disk, whatever the folder.
+            if "seriesId" in params and "downloadId" not in params:
+                return self._json({"message": "File doesn't exist: /tv/elsewhere.mkv"}, 500)
             return self._json(s.manual.get(params.get("folder"), []))
         if path == "/api/v3/release":
             s.looked.append(int(params.get("episodeId", 0)))
