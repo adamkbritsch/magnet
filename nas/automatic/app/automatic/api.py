@@ -24,11 +24,12 @@ import traceback
 import urllib.parse
 import urllib.request
 
+from . import match as matching
 from . import qbstate, rules
 from .qbit import AuthRejected, UpstreamError
 from .sonarr import SonarrError
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 PROFILE_NAME = "Magnet"
 # How choosy a show is about its first copy. Each is a Sonarr profile, so every search
 # -- Sonarr's own, the scout's, a search asked for by hand -- holds to it.
@@ -64,8 +65,9 @@ class API:
     TBA = "Sonarr will not import an episode still titled TBA"
 
     def __init__(self, gate, sonarr, store, token, path_map, plex=None, watched_days=30, log=print, sources=None,
-                 scout=None, auto_copy=True, seasons=None, remove_after_copy=True):
+                 scout=None, auto_copy=True, seasons=None, remove_after_copy=True, match=None):
         self.auto_copy = auto_copy
+        self.match = match        # SeasonMatch, or None: seasons are not matched
         self.remove_after_copy = remove_after_copy
         self._not_home = {}       # hash -> when it was last found not wholly in the library
         self._home_cache = (0.0, None, set())
@@ -404,6 +406,16 @@ class API:
         self.need_sonarr()
         return self.scout.search_now(int(episode_id))
 
+    def season_match(self, series_id, season, target=None):
+        """Every episode of a season the library has, in one format: the format of its
+        biggest episodes, or `target`."""
+        if not self.match:
+            raise ValueError("season matching is not running on the NAS")
+        if self.paused():
+            raise ValueError("Automatic is paused; resume it first")
+        self.need_sonarr()
+        return self.match.start(series_id, season, target)
+
     # -- activity ----------------------------------------------------------------
     def _series_titles(self):
         when, cached = self._titles
@@ -448,7 +460,9 @@ class API:
             first = info.get(eids[0]) if eids else None
             upgrade = False
             if r["kind"] == "transferred":
-                upgrade = any(e in arrived for e in eids)
+                # A copy that replaced the library's file is an upgrade even when the file
+                # it replaced came from somewhere else.
+                upgrade = any(e in arrived for e in eids) or "in place of" in (r["message"] or "")
                 arrived.update(eids)
             message = r["message"] or ""
             name, sep, rest = message.partition(": ")
@@ -492,8 +506,9 @@ class API:
         self.need_sonarr()
         s = self.sonarr.get(f"series/{series_id}")
         files = {f["id"]: f for f in self.sonarr.get("episodefile", seriesId=series_id) or []}
-        seasons = {}
+        seasons, records = {}, {}
         for e in self.sonarr.get("episode", seriesId=series_id) or []:
+            records.setdefault(e.get("seasonNumber", 0), []).append(e)
             f = files.get(e.get("episodeFileId")) if e.get("hasFile") else None
             ends = self.scout.window_end([e["id"]]) if self.scout else None
             seasons.setdefault(e.get("seasonNumber", 0), []).append({
@@ -507,13 +522,24 @@ class API:
                          "path": f.get("relativePath")} if f else None,
                 "betterUntil": _iso(ends)})
         order = sorted(seasons, key=lambda n: (n == 0, -n))     # newest first, specials last
+        # Each season's formats, and which episodes are not in its main one.
+        orders = self.match.orders() if self.match else {}
+        formats = {n: matching.summarize(records[n], files, orders=orders) for n in order}
+        for n in order:
+            per = {r["id"]: r for r in formats[n]["episodes"]}
+            for e in seasons[n]:
+                r = per.get(e["id"]) or {}
+                e.update(format=r.get("format"), formatState=r.get("state"), matching=r.get("matching", False))
         torrents = [t for t in self.seedbox(titles={s["id"]: s.get("title")})["torrents"]
                     if t.get("series") == s.get("title")]
         events = [a for a in self.activity(limit=1000)["events"] if a["seriesId"] == series_id][:80]
         return {"show": self._show(s), "profile": next((n for n, i in self.profile_ids().items()
                                                          if i == s.get("qualityProfileId")), None),
                 "levels": [{"id": k, "title": LEVEL_TEXT[k]} for k in LEVELS],
-                "seasons": [{"season": n, "episodes": sorted(seasons[n], key=lambda e: e["episode"] or 0)}
+                "seasons": [{"season": n, "episodes": sorted(seasons[n], key=lambda e: e["episode"] or 0),
+                             "match": {"target": formats[n]["target"],
+                                       "groups": [{k: g[k] for k in ("label", "episodes", "size")}
+                                                  for g in formats[n]["groups"]]}}
                             for n in order],
                 "seedbox": torrents, "activity": events, "paused": self.paused()}
 
@@ -614,16 +640,40 @@ class API:
         src, dst = self.path_map
         if not content.startswith(src):
             raise ValueError(f"cannot map {content!r} to a path Sonarr can see")
-        cmd = self.sonarr.import_path(dst + content[len(src):], h)
+        # A copy taken to match its season replaces the library's file even where Sonarr
+        # rates that file as good; its own scan would keep it.
+        order = self.match.hashes(self._grabs_by_hash()).get(h) if self.match else None
+        path = dst + content[len(src):]
+        cmd = self.match.import_copy(path, order) if order else self.sonarr.import_path(path, h)
         tid = self.store.add_transfer(h, t["name"], cmd["id"])
         self.store.event("transfer", h, f"{t['name']}: copying to the NAS")
         return {"id": tid, "commandId": cmd["id"]}
 
     def check_transfers(self):
-        for tr in self.store.running_transfers():
+        running = self.store.running_transfers()
+        orders = self.match.hashes(self._grabs_by_hash()) if self.match and running else {}
+        for tr in running:
             try:
                 c = self.sonarr.command(tr["command_id"])
             except SonarrError:
+                continue
+            if c.get("status") == "completed" and tr["hash"] in orders:
+                # A manual import leaves no record against the download: the episode's
+                # file, now in the season's format and newer than the copy, is the proof.
+                order = orders[tr["hash"]]
+                try:
+                    f = self.match.arrived(order, tr["created"])
+                except SonarrError:
+                    continue
+                if f:
+                    if self.seasons and self.seasons.enabled() and f.get("path"):
+                        self.seasons.queue(order["series"], f["path"], [order["episodeId"]])
+                    self.store.update_transfer(tr["id"], "done", f.get("path") or "imported")
+                    self.store.event("transferred", tr["hash"], f"{tr['name']}: on the NAS, in place of the old file")
+                else:
+                    why = "Sonarr did not put it in place of the library's file"
+                    self.store.update_transfer(tr["id"], "failed", why)
+                    self.store.event("transfer", tr["hash"], f"{tr['name']}: {why}")
                 continue
             if c.get("status") == "completed":
                 # "Completed" is the scan finishing, not the file arriving: Sonarr also
@@ -754,6 +804,8 @@ class API:
                                          and (rival(o, s, e) > score
                                               or (rival(o, s, e) == score and (o in settled or o < h)))
                                          for o, (s, oe) in cover.items()) for e in eps)
+        # A copy taken to match its season is wanted whatever the library holds.
+        ordered = self.match.hashes(grabs) if self.match else {}
         out = {}
         for h in finished:
             tr = latest.get(h)
@@ -762,7 +814,7 @@ class API:
                 out[h] = (tr["status"], message)
             elif tr and tr["status"] == "failed" and (h in given_up or not self.auto_copy):
                 out[h] = ("failed", message)
-            elif self.auto_copy and h in cover and beaten(h):
+            elif self.auto_copy and h in cover and h not in ordered and beaten(h):
                 out[h] = ("skipped", "A copy at least as good is in the library or on its way there")
             elif self.auto_copy and h in cover:
                 out[h] = ("waiting", message)
@@ -901,6 +953,9 @@ class API:
         while True:
             try:
                 self.check_transfers()
+                if self.match:
+                    self.match.tick(self._grabs_by_hash(), self.store.decisions(),
+                                    {t["hash"] for t in self.store.running_transfers()})
                 self.retire_copied()
                 self.auto_transfer()
             except Exception as e:
@@ -981,6 +1036,9 @@ def make_handler(api):
                     return self._json(200, api.set_paused(bool(body["paused"])))
                 if method == "POST" and path == "/v1/search-now":
                     return self._json(200, api.search_now(int(body["episodeId"])))
+                if method == "POST" and path == "/v1/season-match":
+                    return self._json(200, api.season_match(int(body["seriesId"]), int(body["season"]),
+                                                            body.get("target") or None))
                 if method == "POST" and path == "/v1/show-quality":
                     return self._json(200, api.set_quality(int(body["id"]), str(body["level"])))
                 if path == "/v1/sources":

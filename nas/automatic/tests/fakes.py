@@ -184,6 +184,7 @@ class FakeSonarr(_Server):
                                                {"quality": {"name": "WEBDL-2160p", "resolution": 2160}, "allowed": True}]}],
                           "formatItems": [{"name": "Magnet: 1080p", "score": 500}, {"name": "Magnet: 2160p", "score": 3000}]}]
         self.series = {}      # series id -> /series/{id}
+        self.manual = {}      # folder -> what /manualimport finds in it
         self.series_puts = [] # bodies PUT to /series/{id}
         self.alive = True
         super().__init__(_SonarrHandler)
@@ -239,6 +240,8 @@ class _SonarrHandler(http.server.BaseHTTPRequestHandler):
             ids = [int(v) for k, v in urllib.parse.parse_qsl(query) if k == "episodeIds"]
             return self._json([dict(s.episodes.get(i, {}), id=i, hasFile=i in s.has_file, monitored=i not in s.unmonitored)
                                for i in ids])
+        if path == "/api/v3/manualimport":
+            return self._json(s.manual.get(params.get("folder"), []))
         if path == "/api/v3/release":
             s.looked.append(int(params.get("episodeId", 0)))
             return self._json(s.releases.get(int(params.get("episodeId", 0)), []))

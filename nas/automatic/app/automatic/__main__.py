@@ -8,6 +8,7 @@ import threading
 
 from .api import API, make_handler as api_handler
 from .gate import Gate, make_handler as gate_handler
+from .match import SeasonMatch
 from .qbit import QBit
 from .scout import Scout
 from .seasons import LibraryMap, Plex, Seasons
@@ -76,10 +77,15 @@ def main():
         px = plex_access()
         seasons = Seasons(sonarr_slow, Plex(*px) if px else None, library, store, log,
                           skip=os.environ.get("SEASON_SKIP", "").split("|"), data_dir=data)
+    # Matching a season reads whole seasons and searches at length: the patient client.
+    match = None
+    if env("SEASON_MATCH", "true").lower() == "true":
+        match = SeasonMatch(sonarr_slow, store, log, paused=lambda: store.get("paused", False))
+        scout.matching = match.hashes
     api = API(gate, sonarr, store, env("API_TOKEN"), (src, dst), plex_access(),
               int(env("SUGGEST_WATCHED_DAYS", "30")), log, sources, scout,
               auto_copy=env("AUTO_COPY", "true").lower() == "true", seasons=seasons,
-              remove_after_copy=env("REMOVE_AFTER_COPY", "true").lower() == "true")
+              remove_after_copy=env("REMOVE_AFTER_COPY", "true").lower() == "true", match=match)
 
     if seasons:
         scout.placing = seasons.busy

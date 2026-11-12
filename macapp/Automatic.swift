@@ -91,7 +91,10 @@ struct AutoActivity: Codable, Hashable, Identifiable {
 
     var category: Category {
         switch kind {
-        case "transferred", "imported", "kept", "settled", "season": return .library
+        case "transferred", "imported", "kept", "settled", "season", "matched": return .library
+        case "match":
+            let d = detail.lowercased()
+            return d.contains("gave up") || d.contains("could not") ? .problem : .downloading
         case "rejected", "blocklisted", "stalled", "superseded": return kind == "superseded" ? .library : .refused
         case "stuck", "unreadable", "waiting": return .problem
         case "transfer":
@@ -121,6 +124,10 @@ struct AutoActivity: Codable, Hashable, Identifiable {
         case "transfer": return detail.prefix(1).uppercased() + detail.dropFirst()
         case "kept": return "Library copy kept: " + detail
         case "quality": return "New episodes: " + detail
+        case "match" where detail.hasPrefix("taking ") && detail.hasSuffix(")"):
+            // "taking <release> to match the season (WEB 1080p H.264)"
+            let open = detail.lastIndex(of: "(").map { detail.index(after: $0) } ?? detail.endIndex
+            return "Taking a \(detail[open..<detail.index(before: detail.endIndex)]) copy to match the season"
         case "paused" where subject == nil: return "Automatic paused"
         case "paused": return "Waiting for Automatic to be resumed"
         case "waiting": return "Waiting for space on the seedbox"
@@ -163,6 +170,12 @@ struct AutoShowEpisode: Codable, Hashable, Identifiable {
     let hasFile: Bool
     let file: AutoEpisodeFile?
     let betterUntil: String?
+    /// What the library's file is, as matching reads it ("WEB 1080p H.264"), and whether
+    /// that is the season's main format ("match") or not ("off").
+    let format: String?
+    let formatState: String?
+    /// A copy in the season's format is on its way.
+    let matching: Bool?
 
     var airDate: Date? { airDateUtc.flatMap(AutoDate.parse) }
     var aired: Bool { airDate.map { $0 < Date() } ?? false }
@@ -173,8 +186,35 @@ struct AutoShowEpisode: Codable, Hashable, Identifiable {
 struct AutoSeason: Codable, Hashable, Identifiable {
     let season: Int
     let episodes: [AutoShowEpisode]
+    let match: AutoSeasonFormats?
     var id: Int { season }
     var title: String { season == 0 ? "Specials" : "Season \(season)" }
+
+    /// The episodes in the library that are not in `target`, nor on their way to it.
+    func notIn(_ target: String) -> [AutoShowEpisode] {
+        episodes.filter { $0.hasFile && $0.format != nil && $0.format != target && $0.matching != true }
+    }
+    var beingMatched: [AutoShowEpisode] { episodes.filter { $0.matching == true } }
+}
+
+/// One format a season's files are in, and the median size of an episode in it.
+struct AutoFormatGroup: Codable, Hashable {
+    let label: String
+    let episodes: [Int?]
+    let size: Int64
+    var numbers: [Int] { episodes.compactMap { $0 } }
+}
+
+/// A season's formats, biggest first; `target` is the biggest's.
+struct AutoSeasonFormats: Codable, Hashable {
+    let target: String?
+    let groups: [AutoFormatGroup]
+}
+
+struct AutoSeasonMatch: Codable {
+    let started: Int
+    let target: String?
+    let message: String
 }
 
 struct AutoLevel: Codable, Hashable, Identifiable {
@@ -551,6 +591,13 @@ struct AutoClient: Sendable {
                                                      timeout: 300))
     }
 
+    /// Starts matching a season on the NAS. The searches run there afterwards.
+    func seasonMatch(seriesId: Int, season: Int, target: String?) async throws -> AutoSeasonMatch {
+        var body: [String: Any] = ["seriesId": seriesId, "season": season]
+        if let target { body["target"] = target }
+        return try decode(AutoSeasonMatch.self, await request("POST", "v1/season-match", body: body, timeout: 120))
+    }
+
     func setQuality(seriesId: Int, level: String) async throws -> AutoShow {
         try decode(AutoShow.self, await request("POST", "v1/show-quality", body: ["id": seriesId, "level": level],
                                                 timeout: 60))
@@ -912,6 +959,25 @@ final class AutomaticModel: ObservableObject {
             await refresh()
         } catch {
             notice = "Could not search for \(label): \(error.localizedDescription)"
+        }
+    }
+
+    /// Brings every episode of a season the library has to one format: `target`, one of
+    /// the season's own. `label` names the season in the answer.
+    func matchSeason(seriesId: Int, season: Int, target: String, label: String) async {
+        guard let client = AutoClient.current() else { return }
+        let key = "match-\(seriesId)-\(season)"
+        busy.insert(key)
+        defer { busy.remove(key) }
+        do {
+            let r = try await client.seasonMatch(seriesId: seriesId, season: season, target: target)
+            notice = r.started > 0
+                ? "\(label): \(r.message). Each downloads to the seedbox, is checked like any download, "
+                    + "and replaces the file in the library when it finishes."
+                : "\(label): \(r.message)."
+            await refresh()
+        } catch {
+            notice = "Could not match \(label): \(error.localizedDescription)"
         }
     }
 

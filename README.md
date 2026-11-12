@@ -264,6 +264,18 @@ Each is a Sonarr quality profile (`Magnet`, `Magnet 4K`, `Magnet Dolby Vision`, 
 two made the first time they are chosen), so Sonarr's own searches hold to it too. A show
 on some other profile says so, and choosing one moves it onto Magnet's scoring.
 
+**Match Season.** Each episode's row says what its file is: where it came from (WEB, HDTV,
+Blu-ray), its resolution, its codec, and HDR or Dolby Vision. A season whose files are not
+all alike says which are which ("E01–E09 are WEB 1080p H.264, about 1.1 GB each; E10 is
+HDTV 1080p H.265, 390 MB") and offers **Match Season**: each episode not in the format of
+the season's biggest files gets a release in that format, checked like any download, and
+once it finishes it replaces the file in the library. Its menu matches to another of the
+season's formats instead. This is what Sonarr will not do by itself when it rates the odd
+file as good, and it goes by the format rather than by score. Only episodes the library
+has are matched: one you deleted stays deleted. A release the check refuses (a fake with
+an `.exe` in it, say) is followed by the next best, up to three; with none in the format
+yet, it says so and nothing changes.
+
 **Pause** (at the right of the tab strip) stops Automatic searching for, starting or
 copying anything new; downloads already under way finish. A release Sonarr sends while
 paused is still checked, and starts when you resume.

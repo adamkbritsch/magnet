@@ -1275,6 +1275,11 @@ private struct AutoShowPage: View {
                         opened = next
                     })) {
                     VStack(spacing: 0) {
+                        if let id = d.show.id, (season.match?.groups.count ?? 0) > 1 || !season.beingMatched.isEmpty {
+                            AutoSeasonFormatsBar(model: model, season: season, seriesId: id, show: d.show.title,
+                                                 paused: d.paused)
+                                .padding(.bottom, 6)
+                        }
                         ForEach(season.episodes) { ep in
                             AutoShowEpisodeRow(model: model, ep: ep, show: d.show.title,
                                                seedbox: d.seedbox.first {
@@ -1339,6 +1344,12 @@ private struct AutoShowEpisodeRow: View {
                         Text("Looking for a better copy until \(AutoFormat.relativeDay(until))")
                             .font(.system(size: 10.5)).foregroundStyle(.secondary)
                     }
+                    if let fmt = ep.format {
+                        Text([fmt, ep.file?.size.map { AutoFormat.bytes($0) }].compactMap { $0 }
+                            .joined(separator: " \u{00B7} "))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(ep.formatState == "off" ? AnyShapeStyle(Tint.warn) : AnyShapeStyle(.tertiary))
+                    }
                 }
             }
             Spacer(minLength: 12)
@@ -1355,6 +1366,12 @@ private struct AutoShowEpisodeRow: View {
     @ViewBuilder private var status: some View {
         if let f = ep.file {
             HStack(spacing: 4) {
+                if ep.matching == true {
+                    AutoChip(text: "Matching", tint: Tint.busy, symbol: "arrow.triangle.2.circlepath")
+                        .help("A copy in the season's format is on its way; it replaces this file when it arrives.")
+                } else if ep.formatState == "off" {
+                    AutoChip(text: "Not like the rest", tint: Tint.warn)
+                }
                 ForEach(f.badges.prefix(3), id: \.self) { b in AutoChip(text: b.text, tint: b.isDV ? Tint.check : .secondary) }
                 if f.badges.isEmpty, let q = f.quality { AutoChip(text: q) }
                 AutoChip(text: "In the library", tint: Tint.ok, symbol: "checkmark")
@@ -1370,5 +1387,95 @@ private struct AutoShowEpisodeRow: View {
         } else {
             AutoChip(text: "Not in the library").opacity(0.7)
         }
+    }
+}
+
+/// A season whose episodes are not all in one format: which are in which, and a button
+/// that brings the odd ones to the format of the biggest -- or to another of the
+/// season's formats, from its menu.
+private struct AutoSeasonFormatsBar: View {
+    @ObservedObject var model: AutomaticModel
+    let season: AutoSeason
+    let seriesId: Int
+    let show: String
+    let paused: Bool
+    @State private var asking: String?
+
+    private var groups: [AutoFormatGroup] { season.match?.groups ?? [] }
+    private var target: String? { season.match?.target }
+    private var busy: Bool { model.busy.contains("match-\(seriesId)-\(season.season)") }
+
+    /// "E01-E09", "E10", "E01, E03-E05".
+    static func codes(_ numbers: [Int]) -> String {
+        var runs: [(Int, Int)] = []
+        for n in numbers.sorted() {
+            if let last = runs.last, last.1 + 1 == n { runs[runs.count - 1].1 = n } else { runs.append((n, n)) }
+        }
+        return runs.map { a, b in
+            a == b ? String(format: "E%02d", a) : String(format: "E%02d\u{2013}E%02d", a, b)
+        }.joined(separator: ", ")
+    }
+
+    private func line(_ g: AutoFormatGroup) -> String {
+        let one = g.numbers.count == 1
+        return "\(Self.codes(g.numbers)) \(one ? "is" : "are") \(g.label), "
+            + (one ? AutoFormat.bytes(g.size) : "about \(AutoFormat.bytes(g.size)) each")
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "rectangle.stack").font(.system(size: 14)).foregroundStyle(Tint.warn)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(groups, id: \.label) { g in
+                    Text(line(g)).font(.system(size: 11.5))
+                        .foregroundStyle(g.label == target ? AnyShapeStyle(.primary) : AnyShapeStyle(Tint.warn))
+                }
+                if !season.beingMatched.isEmpty, let t = target {
+                    let n = season.beingMatched.count
+                    Text("Matching \(Self.codes(season.beingMatched.compactMap(\.episode))) to \(t). "
+                         + (n == 1 ? "It replaces the file when it arrives." : "Each replaces its file when it arrives."))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            if busy {
+                ProgressView().controlSize(.small)
+            } else if !paused, let t = target, !season.notIn(t).isEmpty {
+                Menu {
+                    ForEach(groups.filter { $0.label != t }, id: \.label) { g in
+                        Button("Match to \(g.label)") { asking = g.label }
+                    }
+                } label: {
+                    Text("Match Season")
+                } primaryAction: {
+                    asking = t
+                }
+                .menuStyle(.button)
+                .fixedSize()
+                .help("Replace the episodes not in \(t) with \(t) copies")
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(Tint.warn.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .confirmationDialog(question, isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } }),
+                            titleVisibility: .visible) {
+            if let t = asking {
+                let n = season.notIn(t).count
+                Button("Replace \(n) Episode\(n == 1 ? "" : "s")") {
+                    Task { await model.matchSeason(seriesId: seriesId, season: season.season, target: t,
+                                                   label: "\(show) \(season.title)") }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Magnet takes a \(asking ?? "") release of each, checks its files like any download, and replaces "
+                 + "the file in your library once it finishes. Episodes you don't have are left alone.")
+        }
+    }
+
+    private var question: String {
+        guard let t = asking else { return "" }
+        let eps = season.notIn(t).compactMap(\.episode)
+        return "Replace \(Self.codes(eps)) with \(eps.count == 1 ? "a \(t) copy" : "\(t) copies")?"
     }
 }

@@ -146,6 +146,49 @@ do {
     check("activity and show pages decode", false, "\(error)")
 }
 
+print("Test 1d - a season's formats, and matching it")
+do {
+    let season = """
+    {"season": 18, "match": {"target": "WEB 1080p H.264", "groups": [
+       {"label": "WEB 1080p H.264", "episodes": [1, 2], "size": 1150000000},
+       {"label": "HDTV 1080p H.265", "episodes": [10], "size": 390000000}]},
+     "episodes": [
+       {"id": 1, "season": 18, "episode": 1, "title": "a", "airDateUtc": "2025-01-01T00:00:00Z", "monitored": true,
+        "hasFile": true, "file": null, "betterUntil": null, "format": "WEB 1080p H.264", "formatState": "match", "matching": false},
+       {"id": 2, "season": 18, "episode": 2, "title": "b", "airDateUtc": "2025-01-01T00:00:00Z", "monitored": true,
+        "hasFile": true, "file": null, "betterUntil": null, "format": "WEB 1080p H.264", "formatState": "match", "matching": false},
+       {"id": 10, "season": 18, "episode": 10, "title": "c", "airDateUtc": "2025-01-01T00:00:00Z", "monitored": true,
+        "hasFile": true, "file": null, "betterUntil": null, "format": "HDTV 1080p H.265", "formatState": "off", "matching": false},
+       {"id": 11, "season": 18, "episode": 11, "title": "d", "airDateUtc": "2025-01-01T00:00:00Z", "monitored": false,
+        "hasFile": false, "file": null, "betterUntil": null, "format": null, "formatState": "missing", "matching": false}]}
+    """
+    let s = try JSONDecoder().decode(AutoSeason.self, from: Data(season.utf8))
+    check("a season's formats decode, biggest first", s.match?.target == "WEB 1080p H.264"
+          && s.match?.groups.map(\.numbers) == [[1, 2], [10]])
+    check("only the odd episode in the library is to replace, not the missing one",
+          s.notIn("WEB 1080p H.264").map(\.id) == [10])
+    check("matching to the other format would replace the rest", s.notIn("HDTV 1080p H.265").map(\.id) == [1, 2])
+    let ordered = season.replacingOccurrences(of: #""formatState": "off", "matching": false"#,
+                                              with: #""formatState": "off", "matching": true"#)
+    let s2 = try JSONDecoder().decode(AutoSeason.self, from: Data(ordered.utf8))
+    check("an episode on its way is not asked for again", s2.notIn("WEB 1080p H.264").isEmpty
+          && s2.beingMatched.map(\.id) == [10])
+    let older = #"{"season": 1, "episodes": [{"id": 1, "season": 1, "episode": 1, "title": "a", "airDateUtc": null, "monitored": true, "hasFile": true, "file": null, "betterUntil": null}]}"#
+    let s3 = try JSONDecoder().decode(AutoSeason.self, from: Data(older.utf8))
+    check("an older NAS says nothing of formats", s3.match == nil && s3.notIn("x").isEmpty)
+    let event = """
+    {"id": 9, "at": null, "kind": "match", "hash": null,
+     "message": "episode 10: taking Show S18E10 1080p WEB H264-CAKES to match the season (WEB 1080p H.264)",
+     "detail": "taking Show S18E10 1080p WEB H264-CAKES to match the season (WEB 1080p H.264)", "subject": "episode 10",
+     "seriesId": 7, "series": "Show", "season": 18, "episode": 10, "episodeTitle": null, "formats": [], "upgrade": false}
+    """
+    let e = try JSONDecoder().decode(AutoActivity.self, from: Data(event.utf8))
+    check("a match reads without the release name", e.text == "Taking a WEB 1080p H.264 copy to match the season"
+          && e.category == .downloading, e.text)
+} catch {
+    check("a season's formats decode", false, "\(error)")
+}
+
 print("Test 2 - an older NAS without the sources field still decodes")
 do {
     let older = overviewJSON.replacingOccurrences(of: #""sources": {"sites""#, with: #""ignored": {"sites""#)

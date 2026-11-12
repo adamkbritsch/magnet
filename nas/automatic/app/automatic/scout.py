@@ -68,6 +68,9 @@ class Scout:
         # Series whose files the season-folder worker is moving: Sonarr can briefly report
         # no file for them, which is not the same as the file being gone.
         self.placing = lambda: set()
+        # Torrents taken to match a season's format, from the grabs by hash: wanted
+        # whatever their score, so never removed as beaten.
+        self.matching = lambda by_hash: {}
         self._home = {}
         # A pass and a search asked for by hand share the scout's bookkeeping.
         self._lock = threading.Lock()
@@ -359,8 +362,9 @@ class Scout:
                 cover[h] = (score, {r["episodeId"] for r in recs})
         # Finished the way qBittorrent shows it: every byte, and no check running.
         complete = {h for h, t in mine.items() if qbstate.is_finished(t)} | (imported & set(cover))
+        ordered = self.matching(by_hash)
         for h, (score, eps) in cover.items():
-            if h not in mine or h in running or not eps:
+            if h not in mine or h in running or not eps or h in ordered:
                 continue
             # Beaten by a better finished copy -- or equalled by one that reached the NAS
             # after it, which is the copy the library now holds.
